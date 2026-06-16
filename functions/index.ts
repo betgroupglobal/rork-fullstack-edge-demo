@@ -114,6 +114,79 @@ function setProxyDomain(
 }
 
 /**
+ * Create a wildcard DNS record on a Cloudflare zone so every subdomain is
+ * caught by the Worker automatically. Creates a proxied A record `*` pointing
+ * at 100:: (the Cloudflare-proxy placeholder) and returns the record details.
+ * Body: `{ zoneId, recordType? }` — defaults to "A".
+ */
+async function createWildcardDns(request: Request, env: Env): Promise<Response> {
+  const auth = cfAuthHeaders(env);
+  if (!auth) {
+    return decorate(
+      Response.json(
+        { success: false, configured: false, error: "Cloudflare credentials not configured" },
+        { status: 400 },
+      ),
+    );
+  }
+  const body = (await request.json().catch(() => null)) as {
+    zoneId?: string;
+    recordType?: string;
+  } | null;
+  const zoneId = (body?.zoneId ?? "").toString().trim();
+  const recordType = (body?.recordType ?? "").toString().trim().toUpperCase() || "A";
+  if (!zoneId) {
+    return decorate(
+      Response.json(
+        { success: false, error: "zoneId is required" },
+        { status: 400 },
+      ),
+    );
+  }
+  if (recordType !== "A" && recordType !== "AAAA") {
+    return decorate(
+      Response.json(
+        { success: false, error: "recordType must be A or AAAA" },
+        { status: 400 },
+      ),
+    );
+  }
+  // Cloudflare proxied placeholder — 100:: for AAAA, 192.0.2.1 for A.
+  const content = recordType === "AAAA" ? "100::" : "192.0.2.1";
+  try {
+    const res = await fetch(`${CF_API}/zones/${zoneId}/dns_records`, {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: recordType,
+        name: "*",
+        content,
+        proxied: true,
+        ttl: 1,
+        comment: "Edge Gateway wildcard — catches all subdomains",
+      }),
+    });
+    const json = (await res.json()) as CfApiResponse<{ id: string; name: string; type: string; content: string }>;
+    if (!json.success) {
+      const message = json.errors?.[0]?.message ?? "could not create wildcard DNS record";
+      return decorate(
+        Response.json({ success: false, error: message }, { status: 502 }),
+      );
+    }
+    return decorate(
+      Response.json({ success: true, data: json.result }),
+    );
+  } catch {
+    return decorate(
+      Response.json(
+        { success: false, error: "could not reach the Cloudflare API" },
+        { status: 502 },
+      ),
+    );
+  }
+}
+
+/**
  * Allocate a purchased Cloudflare domain to a proxy target. Creates a proxied
  * CNAME record in the chosen zone pointing at this gateway host, then records
  * the hostname on the target so the app can surface it. Body:
@@ -204,6 +277,7 @@ const GATEWAY_VERSION = "1.0.0";
 const INTERCEPT_BODY_MAX_BYTES = 16_384; // Cap per-body read for intercept captures.
 
 // Hop-by-hop headers must never be forwarded between client <-> origin.
+/** Full hop-by-hop set for regular HTTP requests. */
 const HOP_BY_HOP = new Set([
   "connection",
   "keep-alive",
@@ -390,6 +464,105 @@ async function resolveProxy(env: Env, slug: string): Promise<ProxyConfig | null>
   if (!res.ok) return null;
   const json = (await res.json()) as { data?: ProxyConfig };
   return json.data ?? null;
+}
+
+/** Resolve a configured proxy by its allocated domain hostname (for wildcard subdomain routing). */
+async function resolveProxyByDomain(
+  env: Env,
+  hostname: string,
+): Promise<ProxyConfig | null> {
+  const req = new Request(
+    `https://do/__proxy-by-domain?host=${encodeURIComponent(hostname)}`,
+  );
+  req.headers.set("X-Rork-DO-Class", "ItemsStore");
+  req.headers.set("X-Rork-DO-Id", STORE_ID);
+  const res = await env.DO.fetch(req);
+  if (!res.ok) return null;
+  const json = (await res.json()) as { data?: ProxyConfig };
+  return json.data ?? null;
+}
+
+/** Returns true when the request is a WebSocket upgrade (RFC 6455). */
+function isWebSocketUpgrade(request: Request): boolean {
+  const upgrade = (request.headers.get("Upgrade") ?? "").toLowerCase();
+  const connection = (request.headers.get("Connection") ?? "").toLowerCase();
+  return (
+    upgrade === "websocket" &&
+    connection.includes("upgrade")
+  );
+}
+
+/**
+ * Hop-by-hop headers to strip for non-WebSocket requests. For WebSocket
+ * upgrades, Upgrade + Connection must be preserved so the handshake succeeds.
+ */
+function hopByHopFor(request: Request): Set<string> {
+  if (isWebSocketUpgrade(request)) {
+    // Keep Upgrade and Connection for the WebSocket handshake.
+    return new Set([
+      "keep-alive",
+      "proxy-authenticate",
+      "proxy-authorization",
+      "te",
+      "trailer",
+      "transfer-encoding",
+    ]);
+  }
+  return HOP_BY_HOP;
+}
+
+/**
+ * HTMLRewriter-based content rewriting for proxied HTML responses. Fixes
+ * redirect Location headers to point back through the proxy, injects a
+ * <base> tag so relative links resolve correctly, and strips origin
+ * isolation headers that would break the proxied page.
+ */
+function rewriteProxiedContent(
+  response: Response,
+  proxyHost: string,
+  targetHost: string,
+): Response {
+  // Rewrite 3xx Location headers that point to the origin so they point
+  // back through the proxy instead.
+  let location = response.headers.get("Location");
+  if (location) {
+    try {
+      const locUrl = new URL(location);
+      if (locUrl.host === targetHost) {
+        locUrl.host = proxyHost;
+        locUrl.protocol = "https:";
+        location = locUrl.toString();
+      }
+    } catch {
+      // Relative Location — leave as-is; the <base> tag will resolve it.
+    }
+  }
+
+  const headers = new Headers(response.headers);
+  if (location) headers.set("Location", location);
+  // Strip X-Frame-Options so the proxied page can render.
+  headers.delete("X-Frame-Options");
+  headers.delete("Content-Security-Policy");
+  // Inject a <base> tag so relative URLs resolve relative to the origin,
+  // and a small script to rewrite pushState/replaceState URLs.
+  const baseInjection = `
+<head><base href="https://${targetHost}/">
+<script>window.__gwHost="${proxyHost}";window.__gwTarget="${targetHost}";
+(function(){var _wr=history.replaceState,_ps=history.pushState;history.replaceState=function(s,t,u){try{var n=new URL(u||"",location.href);if(n.host==="${targetHost}"){n.host="${proxyHost}";u=n.toString()}}catch(e){}return _wr.call(this,s,t,u)};history.pushState=function(s,t,u){try{var n=new URL(u||"",location.href);if(n.host==="${targetHost}"){n.host="${proxyHost}";u=n.toString()}}catch(e){}return _ps.call(this,s,t,u)}})();</script>`;
+
+  return new HTMLRewriter()
+    .on("head", {
+      element(el) {
+        el.prepend(baseInjection, { html: true });
+      },
+    })
+    .transform(
+      new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      }),
+    );
 }
 
 /**
@@ -622,9 +795,13 @@ async function reverseProxy(
   incoming.searchParams.delete("target");
   target.search = incoming.searchParams.toString();
 
+  const wsUpgrade = isWebSocketUpgrade(request);
   const headers = new Headers(request.headers);
-  for (const name of HOP_BY_HOP) headers.delete(name);
+  for (const name of hopByHopFor(request)) headers.delete(name);
   headers.set("Host", target.host);
+  headers.set("X-Real-IP",
+    request.headers.get("CF-Connecting-IP") ?? "",
+  );
   headers.set("X-Forwarded-Host", incoming.host);
   headers.set("X-Forwarded-Proto", incoming.protocol.replace(":", ""));
   headers.set(
@@ -634,6 +811,11 @@ async function reverseProxy(
       "anonymous",
   );
   headers.set("X-Gateway-Version", GATEWAY_VERSION);
+  // Preserve Cloudflare geo headers that the origin may need.
+  const cfCountry = request.headers.get("CF-IPCountry");
+  if (cfCountry) headers.set("CF-IPCountry", cfCountry);
+  const cfColo = (request as Request & { cf?: { colo?: string } }).cf?.colo;
+  if (cfColo) headers.set("CF-Ray", request.headers.get("CF-Ray") ?? "");
 
   const upstream = new Request(target.toString(), {
     method: request.method,
@@ -648,7 +830,7 @@ async function reverseProxy(
   try {
     const response = await fetch(upstream);
     const respHeaders = new Headers(response.headers);
-    for (const name of HOP_BY_HOP) respHeaders.delete(name);
+    for (const name of hopByHopFor(request)) respHeaders.delete(name);
     respHeaders.set("X-Proxied-By", "edge-gateway-dashboard");
     if (proxyLabel) respHeaders.set("X-Proxy-Target", proxyLabel);
 
@@ -688,17 +870,34 @@ async function reverseProxy(
       );
     }
 
+    // If the proxied response is HTML and we have a proxy domain, rewrite
+    // content so links, redirects, and SPA routing stay inside the proxy.
+    let finalResponse = new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: respHeaders,
+    });
+
+    const contentType = (response.headers.get("Content-Type") ?? "").toLowerCase();
+    const isHtml = contentType.includes("text/html") || contentType.includes("application/xhtml");
+    if (isHtml && proxyLabel) {
+      const config = await resolveProxy(env, proxyLabel);
+      if (config?.proxyDomain) {
+        try {
+          finalResponse = rewriteProxiedContent(
+            finalResponse,
+            config.proxyDomain,
+            target.host,
+          );
+        } catch {
+          // HTMLRewriter failed — return the unrewritten response.
+        }
+      }
+    }
+
     return {
       proxy: proxyLabel,
-      response: decorate(
-        new Response(response.body, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: respHeaders,
-        }),
-        request,
-        env,
-      ),
+      response: decorate(finalResponse, request, env),
       interceptPromise,
     };
   } catch {
@@ -760,6 +959,31 @@ export default {
       return proxied;
     }
 
+    // --- Wildcard host routing ---
+    // If the request arrived on a subdomain that matches a configured proxy
+    // domain (e.g. app.mydomain.com), route it to that proxy's target.
+    const incomingHost = url.host.toLowerCase();
+    const hostProxy = await resolveProxyByDomain(env, incomingHost);
+    if (hostProxy && hostProxy.enabled) {
+      const proxyPath = `/proxy/${hostProxy.slug}${path}${url.search}`;
+      const proxyReq = new Request(
+        `${url.protocol}//${url.host}${proxyPath}`,
+        request,
+      );
+      const { response: hproxied, proxy: hproxy, interceptPromise: hip } =
+        await reverseProxy(proxyReq, env);
+      ctx.waitUntil(
+        logTraffic(
+          request,
+          env,
+          buildTrafficEntry(request, hproxied, path, Date.now() - start, clientIp, hproxy),
+        ),
+      );
+      if (hproxy) ctx.waitUntil(bumpProxyHits(env, hproxy));
+      if (hip) ctx.waitUntil(hip);
+      return hproxied;
+    }
+
     if (path === "/api/cloudflare/zones" && method === "GET") {
       return await listZones(env);
     }
@@ -790,6 +1014,7 @@ export default {
     const isTraffic = path === "/api/traffic";
     const isIntercepts = path === "/api/intercepts";
     const isProxyConfig = path === "/api/proxies" || /^\/api\/proxies\/\d+$/.test(path);
+    const isWildcardDns = path === "/api/cloudflare/wildcard";
     // --- Auth gate ----------------------------------------------------
     if (requiresAuth(path, method)) {
       const authErr = checkAuth(request, env);
@@ -803,7 +1028,8 @@ export default {
       !isTraffic &&
       !isIntercepts &&
       !isProxyConfig &&
-      !isConfigRoute
+      !isConfigRoute &&
+      !isWildcardDns
     ) {
       return decorate(
         Response.json({ success: false, error: "not found" }, { status: 404 }),

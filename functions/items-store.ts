@@ -481,6 +481,29 @@ export class ItemsStore extends DurableObject {
     return rows.length > 0 ? this.toProxy(rows[0]) : null;
   }
 
+  /** Look up a proxy by its allocated proxyDomain (hostname), with wildcard support. */
+  private findProxyByDomain(hostname: string): Proxy | null {
+    // First try exact match.
+    const exact = this.ctx.storage.sql
+      .exec<ProxyRow>("SELECT * FROM proxies WHERE proxy_domain = ? AND proxy_domain != ''", hostname)
+      .toArray();
+    if (exact.length > 0) return this.toProxy(exact[0]);
+
+    // Try wildcard: e.g. "app.example.com" matches proxyDomain "*.example.com".
+    const allDomains = this.ctx.storage.sql
+      .exec<ProxyRow>("SELECT * FROM proxies WHERE proxy_domain != '' AND proxy_domain LIKE '*%'")
+      .toArray();
+    for (const row of allDomains) {
+      const pattern = row.proxy_domain;
+      if (pattern.startsWith("*.")) {
+        const suffix = pattern.slice(2).replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+        const regex = new RegExp("^[^.]+\\." + suffix + "$", "i");
+        if (regex.test(hostname)) return this.toProxy(row);
+      }
+    }
+    return null;
+  }
+
   /** Build a URL-safe, unique slug from a display name (or target host). */
   private uniqueSlug(base: string): string {
     const root =
@@ -563,6 +586,19 @@ export class ItemsStore extends DurableObject {
       const body = (await this.safeJson(request)) as { slug?: string } | null;
       if (body?.slug) this.clearInterceptsForSlug(body.slug);
       return new Response(null, { status: 204 });
+    }
+
+    // Internal: resolve proxy by allocated domain hostname (wildcard routing).
+    if (path === "/__proxy-by-domain" && method === "GET") {
+      const host = (url.searchParams.get("host") ?? "").toLowerCase().trim();
+      if (!host) {
+        return Response.json({ success: false }, { status: 400 });
+      }
+      const proxy = this.findProxyByDomain(host);
+      if (!proxy) {
+        return Response.json({ success: false }, { status: 404 });
+      }
+      return Response.json({ success: true, data: proxy });
     }
 
     // Internal: allocate / clear an allocated proxy domain for a target.
