@@ -1,3 +1,4 @@
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { LinearGradient } from "expo-linear-gradient";
 import {
   Copy,
@@ -84,29 +85,26 @@ export default function SettingsScreen() {
   const [settingsDirty, setSettingsDirty] = useState(false);
 
   useEffect(() => {
-    const AsyncStorage = require("@react-native-async-storage/async-storage").default;
     (async () => {
-      const raw = await AsyncStorage.getItem(SETTINGS_KEY);
-      const stored = raw !== null ? (JSON.parse(raw) as Partial<AppSettings>) : {};
       let apiKey = "";
-      if (Platform.OS !== "web") {
-        const { loadAsync } = require("expo-secure-store");
-        apiKey = (await loadAsync({ key: "edge-api-key" }).catch(() => ({}))).result ?? "";
-      } else {
+      try {
+        const raw = await AsyncStorage.getItem(SETTINGS_KEY);
+        const stored = raw !== null ? (JSON.parse(raw) as Partial<AppSettings>) : {};
         apiKey = (await AsyncStorage.getItem("edge-api-key")) ?? "";
+        setSettings({
+          gatewayUrl: stored.gatewayUrl ?? "",
+          proxyHost: stored.proxyHost ?? "",
+          allowedOrigins: stored.allowedOrigins ?? "",
+          apiKey,
+        });
+      } catch {
+        setSettings(defaultSettings());
       }
-      setSettings({
-        gatewayUrl: stored.gatewayUrl ?? "",
-        proxyHost: stored.proxyHost ?? "",
-        allowedOrigins: stored.allowedOrigins ?? "",
-        apiKey,
-      });
       setSettingsLoaded(true);
     })();
   }, []);
 
   const persistSettings = useCallback(async (next: AppSettings) => {
-    const AsyncStorage = require("@react-native-async-storage/async-storage").default;
     await AsyncStorage.setItem(
       SETTINGS_KEY,
       JSON.stringify({
@@ -115,12 +113,7 @@ export default function SettingsScreen() {
         allowedOrigins: next.allowedOrigins,
       }),
     );
-    if (Platform.OS !== "web") {
-      const { setItemAsync } = require("expo-secure-store");
-      await setItemAsync("edge-api-key", next.apiKey);
-    } else {
-      await AsyncStorage.setItem("edge-api-key", next.apiKey);
-    }
+    await AsyncStorage.setItem("edge-api-key", next.apiKey);
   }, []);
 
   const updateSetting = useCallback(
@@ -466,7 +459,7 @@ export default function SettingsScreen() {
           </View>
         </View>
 
-        <Text style={styles.footer}>Settings stored locally · API key in secure storage</Text>
+        <Text style={styles.footer}>Settings stored locally in AsyncStorage</Text>
       </ScrollView>
     </View>
   );

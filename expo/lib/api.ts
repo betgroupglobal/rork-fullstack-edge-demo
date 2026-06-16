@@ -1,3 +1,14 @@
+/** Wraps a fetch call with network-error handling, throwing a clear message instead of a bare TypeError. */
+async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
+  try {
+    return await fetch(url, init);
+  } catch {
+    throw new Error(
+      "Network error — cannot reach the gateway. Verify the gateway URL is correct and the service is online.",
+    );
+  }
+}
+
 /**
  * API client for the Edge Gateway Dashboard. Talks to the Rork-hosted
  * Cloudflare Worker that fronts the ItemsStore Durable Object.
@@ -47,7 +58,12 @@ function readMeta(response: Response, latencyMs: number): GatewayMeta {
 }
 
 async function parse<T>(response: Response): Promise<T> {
-  const text = await response.text();
+  let text: string;
+  try {
+    text = await response.text();
+  } catch {
+    throw new Error("Network error — the gateway is unreachable. Check your connection and gateway URL.");
+  }
   const json = text ? JSON.parse(text) : {};
   if (!response.ok) {
     const message =
@@ -59,7 +75,7 @@ async function parse<T>(response: Response): Promise<T> {
 
 export async function fetchHealth(): Promise<HealthResult> {
   const start = Date.now();
-  const response = await fetch(`${BASE_URL}/health`, { cache: "no-store" });
+  const response = await safeFetch(`${BASE_URL}/health`, { cache: "no-store" });
   const latencyMs = Date.now() - start;
   const data = await parse<Omit<HealthResult, "meta">>(response);
   return { ...data, meta: readMeta(response, latencyMs) };
@@ -69,7 +85,7 @@ export type ItemsResult = { items: Item[]; meta: GatewayMeta };
 
 export async function fetchItems(): Promise<ItemsResult> {
   const start = Date.now();
-  const response = await fetch(`${BASE_URL}/api/items`, { cache: "no-store" });
+  const response = await safeFetch(`${BASE_URL}/api/items`, { cache: "no-store" });
   const latencyMs = Date.now() - start;
   const data = await parse<{ data: Item[] }>(response);
   return { items: data.data, meta: readMeta(response, latencyMs) };
@@ -81,7 +97,7 @@ export async function createItem(input: {
 }, authHeader?: string): Promise<Item> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await fetch(`${BASE_URL}/api/items`, {
+  const response = await safeFetch(`${BASE_URL}/api/items`, {
     method: "POST",
     headers,
     body: JSON.stringify(input),
@@ -97,7 +113,7 @@ export async function updateItem(
 ): Promise<Item> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await fetch(`${BASE_URL}/api/items/${id}`, {
+  const response = await safeFetch(`${BASE_URL}/api/items/${id}`, {
     method: "PUT",
     headers,
     body: JSON.stringify(input),
@@ -156,7 +172,7 @@ export type ZonesResult = {
  * `configured: false` (without throwing) when credentials are not set yet.
  */
 export async function fetchCloudflareZones(): Promise<ZonesResult> {
-  const response = await fetch(`${BASE_URL}/api/cloudflare/zones`, {
+  const response = await safeFetch(`${BASE_URL}/api/cloudflare/zones`, {
     cache: "no-store",
   });
   const text = await response.text();
@@ -185,7 +201,7 @@ export async function allocateProxyDomain(input: {
   zoneId: string;
   hostname: string;
 }): Promise<{ hostname: string; target: string }> {
-  const response = await fetch(`${BASE_URL}/api/cloudflare/allocate`, {
+  const response = await safeFetch(`${BASE_URL}/api/cloudflare/allocate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(input),
@@ -202,7 +218,7 @@ export function proxyUrl(slug: string): string {
 }
 
 export async function fetchProxies(): Promise<Proxy[]> {
-  const response = await fetch(`${BASE_URL}/api/proxies`, { cache: "no-store" });
+  const response = await safeFetch(`${BASE_URL}/api/proxies`, { cache: "no-store" });
   const data = await parse<{ data: Proxy[] }>(response);
   return data.data;
 }
@@ -213,7 +229,7 @@ export async function createProxy(input: {
 }, authHeader?: string): Promise<Proxy> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await fetch(`${BASE_URL}/api/proxies`, {
+  const response = await safeFetch(`${BASE_URL}/api/proxies`, {
     method: "POST",
     headers,
     body: JSON.stringify(input),
@@ -229,7 +245,7 @@ export async function updateProxy(
 ): Promise<Proxy> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await fetch(`${BASE_URL}/api/proxies/${id}`, {
+  const response = await safeFetch(`${BASE_URL}/api/proxies/${id}`, {
     method: "PUT",
     headers,
     body: JSON.stringify(input),
@@ -241,7 +257,7 @@ export async function updateProxy(
 export async function deleteProxy(id: number, authHeader?: string): Promise<void> {
   const headers: Record<string, string> = {};
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await fetch(`${BASE_URL}/api/proxies/${id}`, {
+  const response = await safeFetch(`${BASE_URL}/api/proxies/${id}`, {
     method: "DELETE",
     headers,
   });
@@ -266,7 +282,7 @@ export type InterceptCapture = {
 export async function fetchIntercepts(authHeader?: string): Promise<InterceptCapture[]> {
   const headers: Record<string, string> = { "X-Intercept-TTL": "600" };
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await fetch(`${BASE_URL}/api/intercepts`, {
+  const response = await safeFetch(`${BASE_URL}/api/intercepts`, {
     cache: "no-store",
     headers,
   });
@@ -278,7 +294,7 @@ export async function fetchIntercepts(authHeader?: string): Promise<InterceptCap
 export async function deleteIntercepts(authHeader?: string): Promise<void> {
   const headers: Record<string, string> = {};
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await fetch(`${BASE_URL}/api/intercepts`, {
+  const response = await safeFetch(`${BASE_URL}/api/intercepts`, {
     method: "DELETE",
     headers,
   });
@@ -288,7 +304,7 @@ export async function deleteIntercepts(authHeader?: string): Promise<void> {
 export async function deleteItem(id: number, authHeader?: string): Promise<void> {
   const headers: Record<string, string> = {};
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await fetch(`${BASE_URL}/api/items/${id}`, {
+  const response = await safeFetch(`${BASE_URL}/api/items/${id}`, {
     method: "DELETE",
     headers,
   });
@@ -311,7 +327,7 @@ export type TrafficResult = {
 /** Reads the gateway's intercepted traffic feed (ring buffer of recent requests). */
 export async function fetchTraffic(): Promise<TrafficResult> {
   const start = Date.now();
-  const response = await fetch(`${BASE_URL}/api/traffic`, { cache: "no-store" });
+  const response = await safeFetch(`${BASE_URL}/api/traffic`, { cache: "no-store" });
   const latencyMs = Date.now() - start;
   const data = await parse<{ data: TrafficEntry[]; stats: TrafficStats }>(response);
   return {
@@ -327,7 +343,7 @@ export type WorkerConfig = Record<string, string>;
 export async function fetchWorkerConfig(authHeader?: string): Promise<WorkerConfig> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await fetch(`${BASE_URL}/api/config`, {
+  const response = await safeFetch(`${BASE_URL}/api/config`, {
     cache: "no-store",
     headers,
   });
@@ -342,7 +358,7 @@ export async function updateWorkerConfig(
 ): Promise<WorkerConfig> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await fetch(`${BASE_URL}/api/config`, {
+  const response = await safeFetch(`${BASE_URL}/api/config`, {
     method: "PUT",
     headers,
     body: JSON.stringify(entries),
@@ -355,7 +371,7 @@ export async function updateWorkerConfig(
 export async function deleteWorkerConfig(authHeader?: string): Promise<WorkerConfig> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await fetch(`${BASE_URL}/api/config`, {
+  const response = await safeFetch(`${BASE_URL}/api/config`, {
     method: "DELETE",
     headers,
   });
