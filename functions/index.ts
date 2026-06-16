@@ -375,20 +375,26 @@ type ProxyConfig = {
   interceptEnabled: boolean;
   injectJs: string;
   injectJsEnabled: boolean;
+  /** Allocated Cloudflare domain for this proxy (e.g. "api.example.com"). */
+  proxyDomain: string;
+  /** Cloudflare zone ID for DNS cleanup. */
+  cfZoneId: string;
+  /** Cloudflare DNS record ID for cleanup. */
+  cfRecordId: string;
 };
 
 /** Look up a proxy from the DO by its numeric id (internal). */
 async function resolveProxyById(
   env: Env,
   id: number,
-): Promise<ProxyConfig & { proxyDomain?: string; cfZoneId?: string; cfRecordId?: string } | null> {
+): Promise<ProxyConfig | null> {
   const req = new Request(`https://do/__proxy-by-id?id=${id}`);
   req.headers.set("X-Rork-DO-Class", "ItemsStore");
   req.headers.set("X-Rork-DO-Id", STORE_ID);
   const res = await env.DO.fetch(req);
   if (!res.ok) return null;
   const json = (await res.json()) as {
-    data?: ProxyConfig & { proxyDomain?: string; cfZoneId?: string; cfRecordId?: string };
+    data?: ProxyConfig;
   };
   return json.data ?? null;
 }
@@ -1002,6 +1008,9 @@ export default {
     }
     if (path === "/api/cloudflare/allocate" && method === "POST") {
       return await allocateDomain(request, env);
+    }
+    if (path === "/api/cloudflare/wildcard" && method === "POST") {
+      return await createWildcardDns(request, env);
     }
 
     // Intercept DELETE on a proxy target so we can clean up the Cloudflare
