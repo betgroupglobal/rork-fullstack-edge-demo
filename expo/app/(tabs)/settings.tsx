@@ -84,12 +84,17 @@ export default function SettingsScreen() {
   const [settingsDirty, setSettingsDirty] = useState(false);
 
   useEffect(() => {
-    const { loadAsync } = require("expo-secure-store");
     const AsyncStorage = require("@react-native-async-storage/async-storage").default;
     (async () => {
       const raw = await AsyncStorage.getItem(SETTINGS_KEY);
       const stored = raw !== null ? (JSON.parse(raw) as Partial<AppSettings>) : {};
-      const apiKey = (await loadAsync({ key: "edge-api-key" }).catch(() => ({}))).result ?? "";
+      let apiKey = "";
+      if (Platform.OS !== "web") {
+        const { loadAsync } = require("expo-secure-store");
+        apiKey = (await loadAsync({ key: "edge-api-key" }).catch(() => ({}))).result ?? "";
+      } else {
+        apiKey = (await AsyncStorage.getItem("edge-api-key")) ?? "";
+      }
       setSettings({
         gatewayUrl: stored.gatewayUrl ?? "",
         proxyHost: stored.proxyHost ?? "",
@@ -102,7 +107,6 @@ export default function SettingsScreen() {
 
   const persistSettings = useCallback(async (next: AppSettings) => {
     const AsyncStorage = require("@react-native-async-storage/async-storage").default;
-    const { setItemAsync } = require("expo-secure-store");
     await AsyncStorage.setItem(
       SETTINGS_KEY,
       JSON.stringify({
@@ -111,7 +115,12 @@ export default function SettingsScreen() {
         allowedOrigins: next.allowedOrigins,
       }),
     );
-    await setItemAsync("edge-api-key", next.apiKey);
+    if (Platform.OS !== "web") {
+      const { setItemAsync } = require("expo-secure-store");
+      await setItemAsync("edge-api-key", next.apiKey);
+    } else {
+      await AsyncStorage.setItem("edge-api-key", next.apiKey);
+    }
   }, []);
 
   const updateSetting = useCallback(
