@@ -100,8 +100,6 @@ export function useUpdateProxy(authHeader?: string): UseMutationResult<
     mutationFn: ({ id, ...rest }) => updateProxy(id, rest, authHeader),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.proxies });
-      queryClient.invalidateQueries({ queryKey: queryKeys.intercepts });
-      queryClient.invalidateQueries({ queryKey: queryKeys.traffic });
     },
   });
 }

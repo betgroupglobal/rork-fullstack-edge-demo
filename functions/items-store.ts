@@ -293,15 +293,22 @@ export class ItemsStore extends DurableObject {
   ): { allowed: boolean; remaining: number; reset: number } {
     const now = Date.now();
     const windowStart = now - windowSeconds * 1000;
-    this.ctx.storage.sql.exec("DELETE FROM rate_hits WHERE ts < ?", windowStart);
-    const used = this.ctx.storage.sql
-      .exec<{ n: number }>("SELECT COUNT(*) AS n FROM rate_hits WHERE ip = ?", ip)
-      .one().n;
+    safeSql(() => {
+      this.ctx.storage.sql.exec("DELETE FROM rate_hits WHERE ts < ?", windowStart);
+    });
+    const usedResult = safeSql(() =>
+      this.ctx.storage.sql
+        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM rate_hits WHERE ip = ?", ip)
+        .one().n,
+    );
+    const used = usedResult.ok ? usedResult.value : limit;
     const reset = Math.ceil((now + windowSeconds * 1000) / 1000);
     if (used >= limit) {
       return { allowed: false, remaining: 0, reset };
     }
-    this.ctx.storage.sql.exec("INSERT INTO rate_hits (ip, ts) VALUES (?, ?)", ip, now);
+    safeSql(() => {
+      this.ctx.storage.sql.exec("INSERT INTO rate_hits (ip, ts) VALUES (?, ?)", ip, now);
+    });
     return { allowed: true, remaining: Math.max(0, limit - used - 1), reset };
   }
 
@@ -317,60 +324,73 @@ export class ItemsStore extends DurableObject {
 
   /** Record an intercept capture — request + response payloads for a proxied target. */
   private recordIntercept(entry: Omit<InterceptCapture, "id">): void {
-    this.ctx.storage.sql.exec(
-      "INSERT INTO intercept_captures (ts, slug, method, path, req_headers, req_body, resp_status, resp_headers, resp_body, host) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      entry.ts,
-      entry.slug,
-      entry.method,
-      entry.path,
-      entry.reqHeaders,
-      entry.reqBody,
-      entry.respStatus,
-      entry.respHeaders,
-      entry.respBody,
-      entry.host,
-    );
-    this.ctx.storage.sql.exec(
-      "DELETE FROM intercept_captures WHERE id NOT IN (SELECT id FROM intercept_captures ORDER BY id DESC LIMIT ?)",
-      INTERCEPT_LIMIT,
-    );
+    safeSql(() => {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO intercept_captures (ts, slug, method, path, req_headers, req_body, resp_status, resp_headers, resp_body, host) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        entry.ts,
+        entry.slug,
+        entry.method,
+        entry.path,
+        entry.reqHeaders,
+        entry.reqBody,
+        entry.respStatus,
+        entry.respHeaders,
+        entry.respBody,
+        entry.host,
+      );
+    });
+    safeSql(() => {
+      this.ctx.storage.sql.exec(
+        "DELETE FROM intercept_captures WHERE id NOT IN (SELECT id FROM intercept_captures ORDER BY id DESC LIMIT ?)",
+        INTERCEPT_LIMIT,
+      );
+    });
   }
 
   /** Purge captures older than `ttlSeconds` across all slugs. */
   private purgeExpiredIntercepts(ttlSeconds: number): void {
     const cutoff = Date.now() - ttlSeconds * 1000;
-    this.ctx.storage.sql.exec("DELETE FROM intercept_captures WHERE ts < ?", cutoff);
+    safeSql(() => {
+      this.ctx.storage.sql.exec("DELETE FROM intercept_captures WHERE ts < ?", cutoff);
+    });
   }
 
   private listIntercepts(): InterceptCapture[] {
-    return this.ctx.storage.sql
-      .exec<InterceptRow>("SELECT * FROM intercept_captures ORDER BY id DESC LIMIT ?", INTERCEPT_LIMIT)
-      .toArray()
-      .map((row) => ({
-        id: row.id,
-        ts: row.ts,
-        slug: row.slug,
-        method: row.method,
-        path: row.path,
-        reqHeaders: row.req_headers,
-        reqBody: row.req_body,
-        respStatus: row.resp_status,
-        respHeaders: row.resp_headers,
-        respBody: row.resp_body,
-        host: row.host,
-      }));
+    const result = safeSql(() =>
+      this.ctx.storage.sql
+        .exec<InterceptRow>("SELECT * FROM intercept_captures ORDER BY id DESC LIMIT ?", INTERCEPT_LIMIT)
+        .toArray()
+        .map((row) => ({
+          id: row.id,
+          ts: row.ts,
+          slug: row.slug,
+          method: row.method,
+          path: row.path,
+          reqHeaders: row.req_headers,
+          reqBody: row.req_body,
+          respStatus: row.resp_status,
+          respHeaders: row.resp_headers,
+          respBody: row.resp_body,
+          host: row.host,
+        })),
+    );
+    return result.ok ? result.value : [];
   }
 
   private clearIntercepts(): void {
-    this.ctx.storage.sql.exec("DELETE FROM intercept_captures");
+    safeSql(() => {
+      this.ctx.storage.sql.exec("DELETE FROM intercept_captures");
+    });
   }
 
   /** Purge all intercept captures for a given proxy slug (cascade cleanup). */
   private clearInterceptsForSlug(slug: string): void {
-    this.ctx.storage.sql.exec(
-      "DELETE FROM intercept_captures WHERE slug = ?",
-      slug,
-    );
+    safeSql(() => {
+      this.ctx.storage.sql.exec(
+        "DELETE FROM intercept_captures WHERE slug = ?",
+        slug,
+      );
+    });
   }
 
   /**
@@ -378,68 +398,82 @@ export class ItemsStore extends DurableObject {
    * ring buffer to the most recent TRAFFIC_LIMIT rows.
    */
   private recordTraffic(entry: Omit<TrafficEntry, "id">): void {
-    this.ctx.storage.sql.exec(
-      "INSERT INTO traffic (ts, method, path, status, latency_ms, cache, ip, country, colo, proxy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-      entry.ts,
-      entry.method,
-      entry.path,
-      entry.status,
-      entry.latencyMs,
-      entry.cache,
-      entry.ip,
-      entry.country,
-      entry.colo,
-      entry.proxy ?? "",
-    );
-    this.ctx.storage.sql.exec(
-      "DELETE FROM traffic WHERE id NOT IN (SELECT id FROM traffic ORDER BY id DESC LIMIT ?)",
-      TRAFFIC_LIMIT,
-    );
+    safeSql(() => {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO traffic (ts, method, path, status, latency_ms, cache, ip, country, colo, proxy) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        entry.ts,
+        entry.method,
+        entry.path,
+        entry.status,
+        entry.latencyMs,
+        entry.cache,
+        entry.ip,
+        entry.country,
+        entry.colo,
+        entry.proxy ?? "",
+      );
+    });
+    safeSql(() => {
+      this.ctx.storage.sql.exec(
+        "DELETE FROM traffic WHERE id NOT IN (SELECT id FROM traffic ORDER BY id DESC LIMIT ?)",
+        TRAFFIC_LIMIT,
+      );
+    });
   }
 
   private listTraffic(): TrafficEntry[] {
-    return this.ctx.storage.sql
-      .exec<TrafficRow>("SELECT * FROM traffic ORDER BY id DESC LIMIT ?", TRAFFIC_LIMIT)
-      .toArray()
-      .map((row) => ({
-        id: row.id,
-        ts: row.ts,
-        method: row.method,
-        path: row.path,
-        status: row.status,
-        latencyMs: row.latency_ms,
-        cache: row.cache,
-        ip: row.ip,
-        country: row.country,
-        colo: row.colo,
-        proxy: row.proxy ?? "",
-      }));
+    const result = safeSql(() =>
+      this.ctx.storage.sql
+        .exec<TrafficRow>("SELECT * FROM traffic ORDER BY id DESC LIMIT ?", TRAFFIC_LIMIT)
+        .toArray()
+        .map((row) => ({
+          id: row.id,
+          ts: row.ts,
+          method: row.method,
+          path: row.path,
+          status: row.status,
+          latencyMs: row.latency_ms,
+          cache: row.cache,
+          ip: row.ip,
+          country: row.country,
+          colo: row.colo,
+          proxy: row.proxy ?? "",
+        })),
+    );
+    return result.ok ? result.value : [];
   }
 
   // --- Worker config --------------------------------------------------
 
   private getConfig(): Record<string, string> {
-    const rows = this.ctx.storage.sql
-      .exec<ConfigRow>("SELECT key, value FROM worker_config")
-      .toArray();
-    const map: Record<string, string> = {};
-    for (const row of rows) map[row.key] = row.value;
-    return map;
+    const result = safeSql(() => {
+      const rows = this.ctx.storage.sql
+        .exec<ConfigRow>("SELECT key, value FROM worker_config")
+        .toArray();
+      const map: Record<string, string> = {};
+      for (const row of rows) map[row.key] = row.value;
+      return map;
+    });
+    return result.ok ? result.value : {};
   }
 
   private setConfig(entries: Record<string, string>): void {
-    for (const [key, value] of Object.entries(entries)) {
-      if (!(CONFIG_FIELDS as readonly string[]).includes(key)) continue;
-      this.ctx.storage.sql.exec(
-        "INSERT INTO worker_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        key,
-        value,
-      );
-    }
+    safeSql(() => {
+      for (const [key, value] of Object.entries(entries)) {
+        if (!(CONFIG_FIELDS as readonly string[]).includes(key)) continue;
+        this.ctx.storage.sql.exec(
+          "INSERT INTO worker_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+          key,
+          value,
+        );
+      }
+    });
   }
 
   private clearConfig(): void {
-    this.ctx.storage.sql.exec("DELETE FROM worker_config");
+    safeSql(() => {
+      this.ctx.storage.sql.exec("DELETE FROM worker_config");
+    });
   }
 
   // --- Proxy targets ---------------------------------------------------
@@ -472,59 +506,73 @@ export class ItemsStore extends DurableObject {
   ): Proxy | null {
     const existing = this.findProxy(id);
     if (!existing) return null;
-    this.ctx.storage.sql.exec(
-      "UPDATE proxies SET proxy_domain = ?, cf_zone_id = ?, cf_record_id = ?, updated_at = ? WHERE id = ?",
-      proxyDomain,
-      cfZoneId ?? "",
-      cfRecordId ?? "",
-      Date.now(),
-      id,
-    );
+    safeSql(() => {
+      this.ctx.storage.sql.exec(
+        "UPDATE proxies SET proxy_domain = ?, cf_zone_id = ?, cf_record_id = ?, updated_at = ? WHERE id = ?",
+        proxyDomain,
+        cfZoneId ?? "",
+        cfRecordId ?? "",
+        Date.now(),
+        id,
+      );
+    });
     return this.findProxy(id);
   }
 
   private listProxies(): Proxy[] {
-    return this.ctx.storage.sql
-      .exec<ProxyRow>("SELECT * FROM proxies ORDER BY created_at DESC")
-      .toArray()
-      .map((row) => this.toProxy(row));
+    const result = safeSql(() =>
+      this.ctx.storage.sql
+        .exec<ProxyRow>("SELECT * FROM proxies ORDER BY created_at DESC")
+        .toArray()
+        .map((row) => this.toProxy(row)),
+    );
+    return result.ok ? result.value : [];
   }
 
   private findProxy(id: number): Proxy | null {
-    const rows = this.ctx.storage.sql
-      .exec<ProxyRow>("SELECT * FROM proxies WHERE id = ?", id)
-      .toArray();
-    return rows.length > 0 ? this.toProxy(rows[0]) : null;
+    const result = safeSql(() => {
+      const rows = this.ctx.storage.sql
+        .exec<ProxyRow>("SELECT * FROM proxies WHERE id = ?", id)
+        .toArray();
+      return rows.length > 0 ? this.toProxy(rows[0]) : null;
+    });
+    return result.ok ? result.value : null;
   }
 
   private findProxyBySlug(slug: string): Proxy | null {
-    const rows = this.ctx.storage.sql
-      .exec<ProxyRow>("SELECT * FROM proxies WHERE slug = ?", slug)
-      .toArray();
-    return rows.length > 0 ? this.toProxy(rows[0]) : null;
+    const result = safeSql(() => {
+      const rows = this.ctx.storage.sql
+        .exec<ProxyRow>("SELECT * FROM proxies WHERE slug = ?", slug)
+        .toArray();
+      return rows.length > 0 ? this.toProxy(rows[0]) : null;
+    });
+    return result.ok ? result.value : null;
   }
 
   /** Look up a proxy by its allocated proxyDomain (hostname), with wildcard support. */
   private findProxyByDomain(hostname: string): Proxy | null {
-    // First try exact match.
-    const exact = this.ctx.storage.sql
-      .exec<ProxyRow>("SELECT * FROM proxies WHERE proxy_domain = ? AND proxy_domain != ''", hostname)
-      .toArray();
-    if (exact.length > 0) return this.toProxy(exact[0]);
+    const result = safeSql(() => {
+      // First try exact match.
+      const exact = this.ctx.storage.sql
+        .exec<ProxyRow>("SELECT * FROM proxies WHERE proxy_domain = ? AND proxy_domain != ''", hostname)
+        .toArray();
+      if (exact.length > 0) return this.toProxy(exact[0]);
 
-    // Try wildcard: e.g. "app.example.com" matches proxyDomain "*.example.com".
-    const allDomains = this.ctx.storage.sql
-      .exec<ProxyRow>("SELECT * FROM proxies WHERE proxy_domain != '' AND proxy_domain LIKE '*%'")
-      .toArray();
-    for (const row of allDomains) {
-      const pattern = row.proxy_domain;
-      if (pattern.startsWith("*.")) {
-        const suffix = pattern.slice(2).replace(/[.+?^${}()|[\]\\]/g, "\\$&");
-        const regex = new RegExp("^[^.]+\\." + suffix + "$", "i");
-        if (regex.test(hostname)) return this.toProxy(row);
+      // Try wildcard: e.g. "app.example.com" matches proxyDomain "*.example.com".
+      const allDomains = this.ctx.storage.sql
+        .exec<ProxyRow>("SELECT * FROM proxies WHERE proxy_domain != '' AND proxy_domain LIKE '*%'")
+        .toArray();
+      for (const row of allDomains) {
+        const pattern = row.proxy_domain;
+        if (pattern.startsWith("*.")) {
+          const suffix = pattern.slice(2).replace(/[.+?^${}()|[\]\\]/g, "\\$&");
+          const regex = new RegExp("^[^.]+\\." + suffix + "$", "i");
+          if (regex.test(hostname)) return this.toProxy(row);
+        }
       }
-    }
-    return null;
+      return null;
+    });
+    return result.ok ? result.value : null;
   }
 
   /** Build a URL-safe, unique slug from a display name (or target host). */
@@ -546,10 +594,12 @@ export class ItemsStore extends DurableObject {
   }
 
   private incrementProxyHits(slug: string): void {
-    this.ctx.storage.sql.exec(
-      "UPDATE proxies SET hits = hits + 1 WHERE slug = ?",
-      slug,
-    );
+    safeSql(() => {
+      this.ctx.storage.sql.exec(
+        "UPDATE proxies SET hits = hits + 1 WHERE slug = ?",
+        slug,
+      );
+    });
   }
 
   override async fetch(request: Request): Promise<Response> {
@@ -764,21 +814,31 @@ export class ItemsStore extends DurableObject {
       const label = name || parsed.hostname;
       const slug = this.uniqueSlug(name || parsed.hostname);
       const now = Date.now();
-      this.ctx.storage.sql.exec(
-        "INSERT INTO proxies (slug, name, target_url, enabled, hits, intercept_enabled, inject_js, inject_js_enabled, created_at, updated_at) VALUES (?, ?, ?, 1, 0, 0, ?, 0, ?, ?)",
-        slug,
-        label,
-        parsed.toString().replace(/\/$/, ""),
-        (body?.injectJs ?? "").toString(),
-        now,
-        now,
+      safeSql(() => {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO proxies (slug, name, target_url, enabled, hits, intercept_enabled, inject_js, inject_js_enabled, created_at, updated_at) VALUES (?, ?, ?, 1, 0, 0, ?, 0, ?, ?)",
+          slug,
+          label,
+          parsed.toString().replace(/\/$/, ""),
+          (body?.injectJs ?? "").toString(),
+          now,
+          now,
+        );
+      });
+      const created = safeSql(() =>
+        this.ctx.storage.sql
+          .exec<ProxyRow>("SELECT * FROM proxies WHERE id = last_insert_rowid()")
+          .one(),
       );
-      const created = this.ctx.storage.sql
-        .exec<ProxyRow>("SELECT * FROM proxies WHERE id = last_insert_rowid()")
-        .one();
+      if (!created.ok || !created.value) {
+        return Response.json(
+          { success: false, error: "failed to create proxy" },
+          { status: 500 },
+        );
+      }
       return withRl(
         Response.json(
-          { success: true, data: this.toProxy(created) },
+          { success: true, data: this.toProxy(created.value) },
           { status: 201 },
         ),
       );
@@ -832,25 +892,30 @@ export class ItemsStore extends DurableObject {
           body?.injectJsEnabled !== undefined
             ? (body.injectJsEnabled ? 1 : 0)
             : existing.injectJsEnabled ? 1 : 0;
-        this.ctx.storage.sql.exec(
-          "UPDATE proxies SET name = ?, target_url = ?, enabled = ?, intercept_enabled = ?, proxy_domain = ?, inject_js = ?, inject_js_enabled = ?, updated_at = ? WHERE id = ?",
-          name || existing.name,
-          targetUrl,
-          enabled,
-          interceptEnabled,
-          proxyDomain,
-          injectJs,
-          injectJsEnabled,
-          Date.now(),
-          id,
-        );
+        safeSql(() => {
+          this.ctx.storage.sql.exec(
+            "UPDATE proxies SET name = ?, target_url = ?, enabled = ?, intercept_enabled = ?, proxy_domain = ?, inject_js = ?, inject_js_enabled = ?, updated_at = ? WHERE id = ?",
+            name || existing.name,
+            targetUrl,
+            enabled,
+            interceptEnabled,
+            proxyDomain,
+            injectJs,
+            injectJsEnabled,
+            Date.now(),
+            id,
+          );
+        });
         return withRl(Response.json({ success: true, data: this.findProxy(id) }));
       }
 
       if (method === "DELETE") {
         // Cascade: wipe intercept captures for this proxy too.
         this.clearInterceptsForSlug(existing.slug);
-        this.ctx.storage.sql.exec("DELETE FROM proxies WHERE id = ?", id);
+        safeSql(() => {
+          this.ctx.storage.sql.exec("DELETE FROM proxies WHERE id = ?", id);
+        });
+        this.listCache = null;
         return withRl(Response.json({ success: true, data: existing }));
       }
     }
@@ -878,20 +943,30 @@ export class ItemsStore extends DurableObject {
       }
       const description = (body?.description ?? "").toString();
       const now = Date.now();
-      this.ctx.storage.sql.exec(
-        "INSERT INTO items (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
-        name,
-        description,
-        now,
-        now,
-      );
+      safeSql(() => {
+        this.ctx.storage.sql.exec(
+          "INSERT INTO items (name, description, created_at, updated_at) VALUES (?, ?, ?, ?)",
+          name,
+          description,
+          now,
+          now,
+        );
+      });
       this.listCache = null;
-      const created = this.ctx.storage.sql
-        .exec<ItemRow>("SELECT * FROM items WHERE id = last_insert_rowid()")
-        .one();
+      const created = safeSql(() =>
+        this.ctx.storage.sql
+          .exec<ItemRow>("SELECT * FROM items WHERE id = last_insert_rowid()")
+          .one(),
+      );
+      if (!created.ok || !created.value) {
+        return Response.json(
+          { success: false, error: "failed to create item" },
+          { status: 500 },
+        );
+      }
       return withRl(
         Response.json(
-          { success: true, data: this.toItem(created) },
+          { success: true, data: this.toItem(created.value) },
           { status: 201 },
         ),
       );
@@ -922,13 +997,15 @@ export class ItemsStore extends DurableObject {
             ? String(body.description)
             : existing.description;
         const now = Date.now();
-        this.ctx.storage.sql.exec(
-          "UPDATE items SET name = ?, description = ?, updated_at = ? WHERE id = ?",
-          name,
-          description,
-          now,
-          id,
-        );
+        safeSql(() => {
+          this.ctx.storage.sql.exec(
+            "UPDATE items SET name = ?, description = ?, updated_at = ? WHERE id = ?",
+            name,
+            description,
+            now,
+            id,
+          );
+        });
         this.listCache = null;
         return withRl(Response.json({ success: true, data: this.findItem(id) }));
       }
@@ -1024,17 +1101,23 @@ export class ItemsStore extends DurableObject {
   }
 
   private listItems(): Item[] {
-    return this.ctx.storage.sql
-      .exec<ItemRow>("SELECT * FROM items ORDER BY created_at DESC")
-      .toArray()
-      .map((row) => this.toItem(row));
+    const result = safeSql(() =>
+      this.ctx.storage.sql
+        .exec<ItemRow>("SELECT * FROM items ORDER BY created_at DESC")
+        .toArray()
+        .map((row) => this.toItem(row)),
+    );
+    return result.ok ? result.value : [];
   }
 
   private findItem(id: number): Item | null {
-    const rows = this.ctx.storage.sql
-      .exec<ItemRow>("SELECT * FROM items WHERE id = ?", id)
-      .toArray();
-    return rows.length > 0 ? this.toItem(rows[0]) : null;
+    const result = safeSql(() => {
+      const rows = this.ctx.storage.sql
+        .exec<ItemRow>("SELECT * FROM items WHERE id = ?", id)
+        .toArray();
+      return rows.length > 0 ? this.toItem(rows[0]) : null;
+    });
+    return result.ok ? result.value : null;
   }
 
   private toItem(row: ItemRow): Item {

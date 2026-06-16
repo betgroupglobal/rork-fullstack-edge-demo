@@ -275,6 +275,17 @@ const RATE_LIMIT_WINDOW = 60; // seconds
 const CACHE_TTL = 10; // seconds
 const GATEWAY_VERSION = "1.0.0";
 const INTERCEPT_BODY_MAX_BYTES = 16_384; // Cap per-body read for intercept captures.
+const WRITE_BODY_MAX_BYTES = 65_536; // Cap body size on write endpoints (64 KB).
+
+/** Content types eligible for intercept body capture — skip binary blobs. */
+const INTERCEPTABLE_CONTENT_TYPES = new Set([
+  "application/json",
+  "application/x-www-form-urlencoded",
+  "text/",
+  "application/xml",
+  "application/xhtml",
+  "multipart/form-data",
+]);
 
 // Hop-by-hop headers must never be forwarded between client <-> origin.
 /** Full hop-by-hop set for regular HTTP requests. */
@@ -715,10 +726,18 @@ const isCacheable = (path: string, method: string): boolean =>
  * target. Hop-by-hop headers are stripped and standard `X-Forwarded-*` /
  * `X-Gateway-Version` headers are added so the origin sees the real client.
  */
+type ReverseProxyResult = {
+  response: Response;
+  proxy: string;
+  interceptPromise: Promise<void> | undefined;
+};
+
 async function reverseProxy(
   request: Request,
   env: Env,
-): Promise<{ response: Response; proxy: string }> {
+  /** Pre-resolved proxy config — avoids a duplicate DO lookup. */
+  preResolvedConfig?: ProxyConfig,
+): Promise<ReverseProxyResult> {
   const incoming = new URL(request.url);
   const segments = incoming.pathname
     .replace(/^\/proxy\/?/, "")
@@ -737,7 +756,8 @@ async function reverseProxy(
   } else if (segments.length > 0) {
     // Configured target: /proxy/<slug>/<rest>
     const slug = segments[0];
-    const config = await resolveProxy(env, slug);
+    const config = proxyConfig ?? await resolveProxy(env, slug);
+    proxyConfig = config;
     if (!config) {
       return {
         proxy: slug,
@@ -749,6 +769,7 @@ async function reverseProxy(
           request,
           env,
         ),
+        interceptPromise: undefined,
       };
     }
     if (!config.enabled) {
@@ -762,6 +783,7 @@ async function reverseProxy(
           request,
           env,
         ),
+        interceptPromise: undefined,
       };
     }
     targetBase = config.targetUrl;
@@ -787,6 +809,7 @@ async function reverseProxy(
         request,
         env,
       ),
+      interceptPromise: undefined,
     };
   }
 
@@ -804,6 +827,7 @@ async function reverseProxy(
         request,
         env,
       ),
+      interceptPromise: undefined,
     };
   }
 
@@ -853,16 +877,18 @@ async function reverseProxy(
     if (proxyLabel) respHeaders.set("X-Proxy-Target", proxyLabel);
 
     // Intercept capture: only if lab mode is on AND this proxy has intercept
-    // enabled. We read limited request/response bodies asynchronously so the
-    // client response is never delayed.
+    // enabled. Bodies are only captured for text-based content types.
+    // Uses the pre-resolved proxyConfig when available (no duplicate DO call).
     const labOn = env.INTERCEPT_LAB_MODE === "true";
-    const interceptProxy = segments.length > 0
-      ? await resolveProxy(env, segments[0])
-      : null;
-    const shouldIntercept = labOn && interceptProxy?.interceptEnabled;
+    const shouldIntercept = labOn && proxyConfig?.interceptEnabled;
 
     let interceptPromise: Promise<void> | undefined;
     if (shouldIntercept) {
+      const respContentType = (response.headers.get("Content-Type") ?? "").toLowerCase();
+      const isInterceptable = [...INTERCEPTABLE_CONTENT_TYPES].some(
+        (prefix) => respContentType.startsWith(prefix),
+      );
+      if (isInterceptable) {
       const incomingHeaders = new Headers(request.headers);
       for (const name of HOP_BY_HOP) incomingHeaders.delete(name);
       const reqBody = request.clone().text().then(
@@ -886,6 +912,7 @@ async function reverseProxy(
             host: target.host,
           }),
       );
+      }
     }
 
     // If the proxied response is HTML and we have a proxy domain, rewrite
@@ -899,7 +926,7 @@ async function reverseProxy(
     const contentType = (response.headers.get("Content-Type") ?? "").toLowerCase();
     const isHtml = contentType.includes("text/html") || contentType.includes("application/xhtml");
     if (isHtml && proxyLabel) {
-      const config = await resolveProxy(env, proxyLabel);
+      const config = proxyConfig ?? await resolveProxy(env, proxyLabel);
       if (config?.proxyDomain) {
         try {
           finalResponse = rewriteProxiedContent(
@@ -930,6 +957,7 @@ async function reverseProxy(
         request,
         env,
       ),
+      interceptPromise: undefined,
     };
   }
 }
@@ -990,7 +1018,7 @@ export default {
         request,
       );
       const { response: hproxied, proxy: hproxy, interceptPromise: hip } =
-        await reverseProxy(proxyReq, env);
+        await reverseProxy(proxyReq, env, hostProxy);
       ctx.waitUntil(
         logTraffic(
           request,
@@ -1041,6 +1069,22 @@ export default {
     if (requiresAuth(path, method)) {
       const authErr = checkAuth(request, env);
       if (authErr) return authErr;
+    }
+
+    // --- Body size gate -------------------------------------------------
+    const isWrite = method === "POST" || method === "PUT" || method === "PATCH";
+    if (isWrite) {
+      const contentLength = Number(request.headers.get("Content-Length") ?? "0");
+      if (contentLength > WRITE_BODY_MAX_BYTES) {
+        return decorate(
+          Response.json(
+            { success: false, error: `request body exceeds ${WRITE_BODY_MAX_BYTES} byte limit` },
+            { status: 413 },
+          ),
+          request,
+          env,
+        );
+      }
     }
 
     const isConfigRoute = path === "/api/config";
