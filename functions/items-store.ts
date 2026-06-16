@@ -51,6 +51,22 @@ type InterceptRow = {
   host: string;
 };
 
+type ConfigRow = {
+  key: string;
+  value: string;
+};
+
+/** Fields exposed by GET /api/config and editable via PUT /api/config. */
+const CONFIG_FIELDS = [
+  "ALLOWED_ORIGINS",
+  "INTERCEPT_LAB_MODE",
+  "INTERCEPT_ALLOWLIST",
+  "INTERCEPT_BLOCKLIST",
+  "INTERCEPT_TTL_SECONDS",
+] as const;
+
+type ConfigFields = (typeof CONFIG_FIELDS)[number];
+
 type TrafficRow = {
   id: number;
   ts: number;
@@ -118,6 +134,16 @@ type ItemRow = {
 };
 
 const STARTED_AT_KEY = "startedAt";
+
+/** Wrap a SQL operation so errors produce a structured 500 instead of crashing the DO. */
+function safeSql<T>(fn: () => T): { ok: true; value: T } | { ok: false; error: string } {
+  try {
+    return { ok: true, value: fn() };
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { ok: false, error: message };
+  }
+}
 
 /**
  * ItemsStore is a single Durable Object instance (keyed "global") that owns
@@ -226,6 +252,12 @@ export class ItemsStore extends DurableObject {
         host TEXT NOT NULL DEFAULT ''
       )
     `);
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS worker_config (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL DEFAULT ''
+      )
+    `);
     this.startedAt = Date.now();
   }
 
@@ -312,6 +344,14 @@ export class ItemsStore extends DurableObject {
     this.ctx.storage.sql.exec("DELETE FROM intercept_captures");
   }
 
+  /** Purge all intercept captures for a given proxy slug (cascade cleanup). */
+  private clearInterceptsForSlug(slug: string): void {
+    this.ctx.storage.sql.exec(
+      "DELETE FROM intercept_captures WHERE slug = ?",
+      slug,
+    );
+  }
+
   /**
    * Append a traffic entry captured by the gateway interceptor, then trim the
    * ring buffer to the most recent TRAFFIC_LIMIT rows.
@@ -353,6 +393,32 @@ export class ItemsStore extends DurableObject {
         colo: row.colo,
         proxy: row.proxy ?? "",
       }));
+  }
+
+  // --- Worker config --------------------------------------------------
+
+  private getConfig(): Record<string, string> {
+    const rows = this.ctx.storage.sql
+      .exec<ConfigRow>("SELECT key, value FROM worker_config")
+      .toArray();
+    const map: Record<string, string> = {};
+    for (const row of rows) map[row.key] = row.value;
+    return map;
+  }
+
+  private setConfig(entries: Record<string, string>): void {
+    for (const [key, value] of Object.entries(entries)) {
+      if (!(CONFIG_FIELDS as readonly string[]).includes(key)) continue;
+      this.ctx.storage.sql.exec(
+        "INSERT INTO worker_config (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        key,
+        value,
+      );
+    }
+  }
+
+  private clearConfig(): void {
+    this.ctx.storage.sql.exec("DELETE FROM worker_config");
   }
 
   // --- Proxy targets ---------------------------------------------------
@@ -492,6 +558,13 @@ export class ItemsStore extends DurableObject {
       return new Response(null, { status: 204 });
     }
 
+    // Internal: cascade-clear intercept captures for a given proxy slug.
+    if (path === "/__intercept-clear" && method === "POST") {
+      const body = (await this.safeJson(request)) as { slug?: string } | null;
+      if (body?.slug) this.clearInterceptsForSlug(body.slug);
+      return new Response(null, { status: 204 });
+    }
+
     // Internal: allocate / clear an allocated proxy domain for a target.
     if (path === "/__proxy-domain" && method === "POST") {
       const body = (await this.safeJson(request)) as {
@@ -540,15 +613,33 @@ export class ItemsStore extends DurableObject {
 
     if (path === "/health") {
       const startedAt = await this.ensureStartedAt();
-      const count = this.ctx.storage.sql
-        .exec<{ n: number }>("SELECT COUNT(*) AS n FROM items")
-        .one().n;
+      const counts = safeSql(() => ({
+        items: this.ctx.storage.sql
+          .exec<{ n: number }>("SELECT COUNT(*) AS n FROM items")
+          .one().n,
+        proxies: this.ctx.storage.sql
+          .exec<{ n: number }>("SELECT COUNT(*) AS n FROM proxies")
+          .one().n,
+        intercepts: this.ctx.storage.sql
+          .exec<{ n: number }>("SELECT COUNT(*) AS n FROM intercept_captures")
+          .one().n,
+        traffic: this.ctx.storage.sql
+          .exec<{ n: number }>("SELECT COUNT(*) AS n FROM traffic")
+          .one().n,
+      }));
+      const config = safeSql(() => this.getConfig());
       return withRl(
         Response.json({
           status: "ok",
           timestamp: new Date().toISOString(),
           uptime: Math.round((Date.now() - startedAt) / 1000),
-          itemCount: count,
+          itemCount: counts.ok ? counts.value.items : 0,
+          proxyCount: counts.ok ? counts.value.proxies : 0,
+          interceptCount: counts.ok ? counts.value.intercepts : 0,
+          trafficCount: counts.ok ? counts.value.traffic : 0,
+          interceptLabMode: config.ok
+            ? (config.value.INTERCEPT_LAB_MODE ?? "false")
+            : "false",
           region: "edge",
         }),
       );
@@ -687,6 +778,8 @@ export class ItemsStore extends DurableObject {
       }
 
       if (method === "DELETE") {
+        // Cascade: wipe intercept captures for this proxy too.
+        this.clearInterceptsForSlug(existing.slug);
         this.ctx.storage.sql.exec("DELETE FROM proxies WHERE id = ?", id);
         return withRl(Response.json({ success: true, data: existing }));
       }
@@ -782,6 +875,72 @@ export class ItemsStore extends DurableObject {
         this.listCache = null;
         return withRl(Response.json({ success: true, data: existing }));
       }
+    }
+
+    // --- /api/config ---------------------------------------------------
+
+    if (path === "/api/config" && method === "GET") {
+      const result = safeSql(() => this.getConfig());
+      if (!result.ok) {
+        return Response.json(
+          { success: false, error: result.error },
+          { status: 500 },
+        );
+      }
+      return withRl(
+        Response.json({ success: true, data: result.value }),
+      );
+    }
+
+    if (path === "/api/config" && method === "PUT") {
+      const body = (await this.safeJson(request)) as Record<string, string> | null;
+      if (!body || Object.keys(body).length === 0) {
+        return Response.json(
+          { success: false, error: "at least one config field is required" },
+          { status: 400 },
+        );
+      }
+      const filtered: Record<string, string> = {};
+      for (const [k, v] of Object.entries(body)) {
+        if ((CONFIG_FIELDS as readonly string[]).includes(k)) {
+          filtered[k] = String(v);
+        }
+      }
+      if (Object.keys(filtered).length === 0) {
+        return Response.json(
+          { success: false, error: "no valid config fields provided" },
+          { status: 400 },
+        );
+      }
+      const result = safeSql(() => {
+        this.setConfig(filtered);
+        return this.getConfig();
+      });
+      if (!result.ok) {
+        return Response.json(
+          { success: false, error: result.error },
+          { status: 500 },
+        );
+      }
+      return withRl(
+        Response.json({ success: true, data: result.value }),
+      );
+    }
+
+    if (path === "/api/config" && method === "DELETE") {
+      const result = safeSql(() => {
+        this.clearConfig();
+        return this.getConfig();
+      });
+      if (!result.ok) {
+        return Response.json(
+          { success: false, error: result.error },
+          { status: 500 },
+        );
+      }
+      return withRl(
+        Response.json({ success: true, data: result.value }),
+      );
     }
 
     return Response.json({ success: false, error: "not found" }, { status: 404 });

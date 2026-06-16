@@ -78,10 +78,12 @@ export async function fetchItems(): Promise<ItemsResult> {
 export async function createItem(input: {
   name: string;
   description: string;
-}): Promise<Item> {
+}, authHeader?: string): Promise<Item> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
   const response = await fetch(`${BASE_URL}/api/items`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(input),
   });
   const data = await parse<{ data: Item }>(response);
@@ -91,10 +93,13 @@ export async function createItem(input: {
 export async function updateItem(
   id: number,
   input: { name: string; description: string },
+  authHeader?: string,
 ): Promise<Item> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
   const response = await fetch(`${BASE_URL}/api/items/${id}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(input),
   });
   const data = await parse<{ data: Item }>(response);
@@ -205,10 +210,12 @@ export async function fetchProxies(): Promise<Proxy[]> {
 export async function createProxy(input: {
   name: string;
   targetUrl: string;
-}): Promise<Proxy> {
+}, authHeader?: string): Promise<Proxy> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
   const response = await fetch(`${BASE_URL}/api/proxies`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(input),
   });
   const data = await parse<{ data: Proxy }>(response);
@@ -218,19 +225,25 @@ export async function createProxy(input: {
 export async function updateProxy(
   id: number,
   input: Partial<{ name: string; targetUrl: string; enabled: boolean; interceptEnabled: boolean }>,
+  authHeader?: string,
 ): Promise<Proxy> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
   const response = await fetch(`${BASE_URL}/api/proxies/${id}`, {
     method: "PUT",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(input),
   });
   const data = await parse<{ data: Proxy }>(response);
   return data.data;
 }
 
-export async function deleteProxy(id: number): Promise<void> {
+export async function deleteProxy(id: number, authHeader?: string): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (authHeader) headers["Authorization"] = authHeader;
   const response = await fetch(`${BASE_URL}/api/proxies/${id}`, {
     method: "DELETE",
+    headers,
   });
   await parse<{ data: Proxy }>(response);
 }
@@ -250,26 +263,34 @@ export type InterceptCapture = {
 };
 
 /** Lists all intercept captures from the gateway. */
-export async function fetchIntercepts(): Promise<InterceptCapture[]> {
+export async function fetchIntercepts(authHeader?: string): Promise<InterceptCapture[]> {
+  const headers: Record<string, string> = { "X-Intercept-TTL": "600" };
+  if (authHeader) headers["Authorization"] = authHeader;
   const response = await fetch(`${BASE_URL}/api/intercepts`, {
     cache: "no-store",
-    headers: { "X-Intercept-TTL": "600" },
+    headers,
   });
   const data = await parse<{ data: InterceptCapture[]; count: number }>(response);
   return data.data;
 }
 
 /** Wipes all intercept captures from the gateway. */
-export async function deleteIntercepts(): Promise<void> {
+export async function deleteIntercepts(authHeader?: string): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (authHeader) headers["Authorization"] = authHeader;
   const response = await fetch(`${BASE_URL}/api/intercepts`, {
     method: "DELETE",
+    headers,
   });
   await parse<{ success: boolean }>(response);
 }
 
-export async function deleteItem(id: number): Promise<void> {
+export async function deleteItem(id: number, authHeader?: string): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (authHeader) headers["Authorization"] = authHeader;
   const response = await fetch(`${BASE_URL}/api/items/${id}`, {
     method: "DELETE",
+    headers,
   });
   await parse<{ data: Item }>(response);
 }
@@ -298,6 +319,48 @@ export async function fetchTraffic(): Promise<TrafficResult> {
     stats: data.stats,
     meta: readMeta(response, latencyMs),
   };
+}
+
+export type WorkerConfig = Record<string, string>;
+
+/** Fetches the current effective worker config (runtime overrides merged with defaults). */
+export async function fetchWorkerConfig(authHeader?: string): Promise<WorkerConfig> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await fetch(`${BASE_URL}/api/config`, {
+    cache: "no-store",
+    headers,
+  });
+  const data = await parse<{ data: WorkerConfig }>(response);
+  return data.data;
+}
+
+/** Persists runtime config overrides to the Durable Object. */
+export async function updateWorkerConfig(
+  entries: Record<string, string>,
+  authHeader?: string,
+): Promise<WorkerConfig> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await fetch(`${BASE_URL}/api/config`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify(entries),
+  });
+  const data = await parse<{ data: WorkerConfig }>(response);
+  return data.data;
+}
+
+/** Clears all runtime config overrides, reverting to wrangler defaults. */
+export async function deleteWorkerConfig(authHeader?: string): Promise<WorkerConfig> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await fetch(`${BASE_URL}/api/config`, {
+    method: "DELETE",
+    headers,
+  });
+  const data = await parse<{ data: WorkerConfig }>(response);
+  return data.data;
 }
 
 /** Sensitive-field patterns for masking in the UI. */

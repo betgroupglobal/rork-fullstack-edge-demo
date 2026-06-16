@@ -20,6 +20,10 @@ type Env = {
   INTERCEPT_ALLOWLIST?: string;
   /** TTL in seconds for intercept captures (default: 600 = 10 min). */
   INTERCEPT_TTL_SECONDS?: string;
+  /** Bearer token required on all write, intercept, and config endpoints. */
+  API_KEY?: string;
+  /** Comma-separated CORS origins; empty or unset allows * (any). */
+  ALLOWED_ORIGINS?: string;
 };
 
 const CF_API = "https://api.cloudflare.com/client/v4";
@@ -212,7 +216,6 @@ const HOP_BY_HOP = new Set([
 ]);
 
 const CORS: Record<string, string> = {
-  "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Access-Control-Expose-Headers":
@@ -227,6 +230,47 @@ const SECURITY: Record<string, string> = {
 };
 
 const STORE_ID = "global";
+
+/**
+ * Resolve the CORS Allow-Origin header for a request. Uses the ALLOWED_ORIGINS
+ * env var (comma-separated list) if set, otherwise falls back to *.
+ */
+function resolveCorsOrigin(request: Request, env: Env): string {
+  const allowed = (env.ALLOWED_ORIGINS ?? "").trim();
+  if (!allowed) return "*";
+  const origin = request.headers.get("Origin") ?? "";
+  const origins = allowed.split(",").map((s) => s.trim().toLowerCase());
+  const originLower = origin.toLowerCase();
+  if (origins.includes(originLower) || origins.includes("*")) {
+    return origin || origins[0];
+  }
+  return origins[0];
+}
+
+/** Endpoints that always require an API key (if configured on the worker). */
+function requiresAuth(path: string, method: string): boolean {
+  // Write operations
+  if (method !== "GET" && path.startsWith("/api/items")) return true;
+  if (method !== "GET" && path.startsWith("/api/proxies")) return true;
+  // Intercept access
+  if (path === "/api/intercepts") return true;
+  // Config access
+  if (path === "/api/config") return true;
+  return false;
+}
+
+/** Check the Authorization header against the configured API_KEY. Returns null on success or a 401 Response on failure. */
+function checkAuth(request: Request, env: Env): Response | null {
+  if (!env.API_KEY) return null; // No key configured => auth is opt-out.
+  const auth = request.headers.get("Authorization") ?? "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (token !== env.API_KEY) {
+    return decorate(
+      Response.json({ success: false, error: "unauthorized" }, { status: 401 }),
+    );
+  }
+  return null;
+}
 
 function dispatch(request: Request, env: Env): Promise<Response> {
   const wrapped = new Request(request.url, request);
@@ -348,7 +392,20 @@ async function resolveProxy(env: Env, slug: string): Promise<ProxyConfig | null>
   return json.data ?? null;
 }
 
-/** Fire-and-forget bump of a proxy target's hit counter. */
+/**
+ * Delete intercept captures associated with a proxy slug. Called as cascade
+ * cleanup when a proxy is deleted.
+ */
+function deleteInterceptsForSlug(env: Env, slug: string): Promise<void> {
+  const req = new Request("https://do/__intercept-clear", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ slug }),
+  });
+  req.headers.set("X-Rork-DO-Class", "ItemsStore");
+  req.headers.set("X-Rork-DO-Id", STORE_ID);
+  return env.DO.fetch(req).then(() => undefined);
+}
 function bumpProxyHits(env: Env, slug: string): Promise<void> {
   const req = new Request("https://do/__proxy-hit", {
     method: "POST",
@@ -429,9 +486,20 @@ function buildTrafficEntry(
   };
 }
 
-function decorate(response: Response, extra?: Record<string, string>): Response {
+function decorate(response: Response, request?: Request, env?: Env, extra?: Record<string, string>): Response {
   const headers = new Headers(response.headers);
-  for (const [k, v] of Object.entries({ ...CORS, ...SECURITY, ...(extra ?? {}) })) {
+  for (const [k, v] of Object.entries(CORS)) {
+    headers.set(k, v);
+  }
+  if (request && env) {
+    headers.set("Access-Control-Allow-Origin", resolveCorsOrigin(request, env));
+  } else {
+    headers.set("Access-Control-Allow-Origin", "*");
+  }
+  for (const [k, v] of Object.entries(SECURITY)) {
+    headers.set(k, v);
+  }
+  for (const [k, v] of Object.entries(extra ?? {})) {
     headers.set(k, v);
   }
   return new Response(response.body, {
@@ -487,6 +555,8 @@ async function reverseProxy(
             { success: false, error: `no proxy configured for "${slug}"` },
             { status: 404 },
           ),
+          request,
+          env,
         ),
       };
     }
@@ -498,6 +568,8 @@ async function reverseProxy(
             { success: false, error: `proxy "${slug}" is disabled` },
             { status: 503 },
           ),
+          request,
+          env,
         ),
       };
     }
@@ -521,6 +593,8 @@ async function reverseProxy(
           },
           { status: 502 },
         ),
+        request,
+        env,
       ),
     };
   }
@@ -536,6 +610,8 @@ async function reverseProxy(
           { success: false, error: "invalid proxy target url" },
           { status: 400 },
         ),
+        request,
+        env,
       ),
     };
   }
@@ -620,6 +696,8 @@ async function reverseProxy(
           statusText: response.statusText,
           headers: respHeaders,
         }),
+        request,
+        env,
       ),
       interceptPromise,
     };
@@ -631,6 +709,8 @@ async function reverseProxy(
           { success: false, error: "bad gateway — upstream unreachable" },
           { status: 502 },
         ),
+        request,
+        env,
       ),
     };
   }
@@ -644,7 +724,9 @@ export default {
     const start = Date.now();
 
     if (method === "OPTIONS") {
-      return new Response(null, { status: 204, headers: { ...CORS, ...SECURITY } });
+      const headers = new Headers({ ...CORS, ...SECURITY });
+      headers.set("Access-Control-Allow-Origin", resolveCorsOrigin(request, env));
+      return new Response(null, { status: 204, headers });
     }
 
     if (path === "/" || path === "/ping") {
@@ -654,6 +736,8 @@ export default {
           gateway: "edge-gateway-dashboard",
           timestamp: new Date().toISOString(),
         }),
+        request,
+        env,
       );
     }
 
@@ -684,13 +768,17 @@ export default {
     }
 
     // Intercept DELETE on a proxy target so we can clean up the Cloudflare
-    // DNS record before the row is removed from durable storage.
+    // DNS record and the associated intercept captures before the row is
+    // removed from durable storage.
     const proxyDeleteMatch = path.match(/^\/api\/proxies\/(\d+)$/);
     if (proxyDeleteMatch && method === "DELETE") {
       const id = Number(proxyDeleteMatch[1]);
       const proxy = await resolveProxyById(env, id);
       if (proxy?.cfZoneId && proxy.cfRecordId) {
         ctx.waitUntil(deleteDnsRecord(env, proxy.cfZoneId, proxy.cfRecordId));
+      }
+      if (proxy?.slug) {
+        ctx.waitUntil(deleteInterceptsForSlug(env, proxy.slug));
       }
       // Fall through to dispatch — DO handles the actual row deletion.
     }
@@ -702,15 +790,25 @@ export default {
     const isTraffic = path === "/api/traffic";
     const isIntercepts = path === "/api/intercepts";
     const isProxyConfig = path === "/api/proxies" || /^\/api\/proxies\/\d+$/.test(path);
+    // --- Auth gate ----------------------------------------------------
+    if (requiresAuth(path, method)) {
+      const authErr = checkAuth(request, env);
+      if (authErr) return authErr;
+    }
+
+    const isConfigRoute = path === "/api/config";
     if (
       path !== "/health" &&
       !path.startsWith("/api/items") &&
       !isTraffic &&
       !isIntercepts &&
-      !isProxyConfig
+      !isProxyConfig &&
+      !isConfigRoute
     ) {
       return decorate(
         Response.json({ success: false, error: "not found" }, { status: 404 }),
+        request,
+        env,
       );
     }
 
@@ -729,7 +827,7 @@ export default {
     if (!response.headers.has("X-Cache")) {
       extra["X-Cache"] = "BYPASS";
     }
-    const decorated = decorate(response, extra);
+    const decorated = decorate(response, request, env, extra);
 
     // Auto-allocate a Cloudflare domain when a new proxy is created, so the
     // user doesn't have to manually pick a zone — the gateway handles it.
@@ -748,9 +846,9 @@ export default {
       );
     }
 
-    // Intercept everything except reads of the analyser feed and proxy config
-    // management, so the traffic view doesn't fill up with its own polling.
-    if (!isTraffic && !isProxyConfig) {
+    // Intercept everything except reads of the analyser feed, proxy config
+    // management, and config routes, so the traffic view stays clean.
+    if (!isTraffic && !isProxyConfig && !isConfigRoute) {
       ctx.waitUntil(
         logTraffic(
           request,
