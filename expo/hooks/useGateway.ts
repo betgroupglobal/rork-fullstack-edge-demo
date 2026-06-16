@@ -7,10 +7,12 @@ import {
 } from "@tanstack/react-query";
 
 import {
+  allocateProxyDomain,
   createItem,
   createProxy,
   deleteItem,
   deleteProxy,
+  fetchCloudflareZones,
   fetchHealth,
   fetchItems,
   fetchProxies,
@@ -22,6 +24,7 @@ import {
   type ItemsResult,
   type Proxy,
   type TrafficResult,
+  type ZonesResult,
 } from "@/lib/api";
 
 export const queryKeys = {
@@ -29,7 +32,31 @@ export const queryKeys = {
   items: ["items"] as const,
   traffic: ["traffic"] as const,
   proxies: ["proxies"] as const,
+  zones: ["cloudflare-zones"] as const,
 };
+
+export function useCloudflareZones(): UseQueryResult<ZonesResult, Error> {
+  return useQuery({
+    queryKey: queryKeys.zones,
+    queryFn: fetchCloudflareZones,
+    staleTime: 60_000,
+    retry: 1,
+  });
+}
+
+export function useAllocateProxyDomain(): UseMutationResult<
+  { hostname: string; target: string },
+  Error,
+  { proxyId: number; zoneId: string; hostname: string }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: allocateProxyDomain,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.proxies });
+    },
+  });
+}
 
 export function useProxies(): UseQueryResult<Proxy[], Error> {
   return useQuery({

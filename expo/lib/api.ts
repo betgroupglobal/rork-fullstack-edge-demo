@@ -122,9 +122,68 @@ export type Proxy = {
   targetUrl: string;
   enabled: boolean;
   hits: number;
+  /** A purchased Cloudflare domain allocated to route this target. */
+  proxyDomain: string;
   createdAt: number;
   updatedAt: number;
 };
+
+export type CloudflareZone = {
+  id: string;
+  name: string;
+  status: string;
+};
+
+export type ZonesResult = {
+  configured: boolean;
+  zones: CloudflareZone[];
+  error?: string;
+};
+
+/**
+ * Lists the purchased domains in the connected Cloudflare account. Returns
+ * `configured: false` (without throwing) when credentials are not set yet.
+ */
+export async function fetchCloudflareZones(): Promise<ZonesResult> {
+  const response = await fetch(`${BASE_URL}/api/cloudflare/zones`, {
+    cache: "no-store",
+  });
+  const text = await response.text();
+  const json = (text ? JSON.parse(text) : {}) as {
+    success?: boolean;
+    configured?: boolean;
+    data?: CloudflareZone[];
+    error?: string;
+  };
+  if (!json.success) {
+    return {
+      configured: json.configured ?? false,
+      zones: [],
+      error: json.error,
+    };
+  }
+  return { configured: true, zones: json.data ?? [] };
+}
+
+/**
+ * Allocates a purchased Cloudflare domain to a proxy target. Creates the DNS
+ * record pointing at the gateway and stores the hostname on the target.
+ */
+export async function allocateProxyDomain(input: {
+  proxyId: number;
+  zoneId: string;
+  hostname: string;
+}): Promise<{ hostname: string; target: string }> {
+  const response = await fetch(`${BASE_URL}/api/cloudflare/allocate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = await parse<{ data: { hostname: string; target: string } }>(
+    response,
+  );
+  return data.data;
+}
 
 /** The public edge URL that routes through a configured proxy target. */
 export function proxyUrl(slug: string): string {

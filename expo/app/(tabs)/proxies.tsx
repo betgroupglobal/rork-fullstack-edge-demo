@@ -5,6 +5,7 @@ import {
   Check,
   Copy,
   Globe,
+  Link2,
   Loader,
   Power,
   Trash2,
@@ -28,6 +29,8 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import PulseDot from "@/components/PulseDot";
 import { theme } from "@/constants/theme";
 import {
+  useAllocateProxyDomain,
+  useCloudflareZones,
   useCreateProxy,
   useDeleteProxy,
   useProxies,
@@ -35,12 +38,109 @@ import {
 } from "@/hooks/useGateway";
 import { proxyUrl, type Proxy } from "@/lib/api";
 
+function DomainPanel({ proxy }: { proxy: Proxy }) {
+  const { data, isLoading, isError } = useCloudflareZones();
+  const allocate = useAllocateProxyDomain();
+  const [pendingId, setPendingId] = useState<string | null>(null);
+
+  const choose = useCallback(
+    (zoneId: string, zoneName: string) => {
+      setPendingId(zoneId);
+      allocate.mutate(
+        { proxyId: proxy.id, zoneId, hostname: `${proxy.slug}.${zoneName}` },
+        { onSettled: () => setPendingId(null) },
+      );
+    },
+    [allocate, proxy.id, proxy.slug],
+  );
+
+  if (isLoading) {
+    return (
+      <View style={styles.domainPanel}>
+        <ActivityIndicator color={theme.colors.accent} size="small" />
+        <Text style={styles.domainHint}>Loading your Cloudflare domains…</Text>
+      </View>
+    );
+  }
+
+  if (isError || !data) {
+    return (
+      <View style={styles.domainPanel}>
+        <Text style={styles.domainHint}>Could not reach Cloudflare.</Text>
+      </View>
+    );
+  }
+
+  if (!data.configured) {
+    return (
+      <View style={styles.domainPanel}>
+        <Text style={styles.domainHint}>
+          {data.error ??
+            "Connect your Cloudflare account to allocate a purchased domain."}
+        </Text>
+      </View>
+    );
+  }
+
+  if (data.zones.length === 0) {
+    return (
+      <View style={styles.domainPanel}>
+        <Text style={styles.domainHint}>
+          No active domains found in your Cloudflare account.
+        </Text>
+      </View>
+    );
+  }
+
+  return (
+    <View style={styles.domainPanel}>
+      <Text style={styles.domainHint}>
+        Pick a domain — we&apos;ll point {proxy.slug}.&lt;domain&gt; at the
+        gateway.
+      </Text>
+      {allocate.isError ? (
+        <Text style={styles.formError}>{allocate.error?.message}</Text>
+      ) : null}
+      <View style={styles.zoneList}>
+        {data.zones.map((zone) => (
+          <Pressable
+            key={zone.id}
+            onPress={() => choose(zone.id, zone.name)}
+            disabled={allocate.isPending}
+            style={({ pressed }) => [styles.zoneRow, pressed && styles.pressed]}
+          >
+            <Globe size={13} color={theme.colors.accent} />
+            <Text style={styles.zoneName} numberOfLines={1}>
+              {proxy.slug}.{zone.name}
+            </Text>
+            {pendingId === zone.id && allocate.isPending ? (
+              <ActivityIndicator color={theme.colors.accent} size="small" />
+            ) : (
+              <ArrowRight size={14} color={theme.colors.textFaint} />
+            )}
+          </Pressable>
+        ))}
+      </View>
+    </View>
+  );
+}
+
 function ProxyCard({ proxy }: { proxy: Proxy }) {
   const updateProxy = useUpdateProxy();
   const deleteProxy = useDeleteProxy();
   const [copied, setCopied] = useState<boolean>(false);
+  const [domainCopied, setDomainCopied] = useState<boolean>(false);
+  const [showDomains, setShowDomains] = useState<boolean>(false);
 
   const url = proxyUrl(proxy.slug);
+  const domainUrl = proxy.proxyDomain ? `https://${proxy.proxyDomain}` : "";
+
+  const copyDomain = useCallback(async () => {
+    if (!domainUrl) return;
+    await Clipboard.setStringAsync(domainUrl);
+    setDomainCopied(true);
+    setTimeout(() => setDomainCopied(false), 1400);
+  }, [domainUrl]);
 
   const copy = useCallback(async () => {
     await Clipboard.setStringAsync(url);
@@ -106,6 +206,35 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
           <Copy size={15} color={theme.colors.textDim} />
         )}
       </Pressable>
+
+      {proxy.proxyDomain ? (
+        <Pressable
+          onPress={copyDomain}
+          style={({ pressed }) => [styles.domainRow, pressed && styles.pressed]}
+        >
+          <Globe size={14} color={theme.colors.ok} />
+          <Text style={styles.domainUrl} numberOfLines={1}>
+            {proxy.proxyDomain}
+          </Text>
+          {domainCopied ? (
+            <Check size={15} color={theme.colors.ok} />
+          ) : (
+            <Copy size={15} color={theme.colors.textDim} />
+          )}
+        </Pressable>
+      ) : null}
+
+      <Pressable
+        onPress={() => setShowDomains((v) => !v)}
+        style={({ pressed }) => [styles.allocateBtn, pressed && styles.pressed]}
+      >
+        <Link2 size={14} color={theme.colors.accent} />
+        <Text style={styles.allocateText}>
+          {proxy.proxyDomain ? "Change domain" : "Allocate domain"}
+        </Text>
+      </Pressable>
+
+      {showDomains ? <DomainPanel proxy={proxy} /> : null}
 
       <View style={styles.cardActions}>
         <Pressable
@@ -516,5 +645,69 @@ const styles = StyleSheet.create({
   },
   pressed: {
     opacity: 0.6,
+  },
+  domainRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing(2),
+    backgroundColor: theme.colors.bg,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.ok,
+    paddingHorizontal: theme.spacing(3),
+    paddingVertical: theme.spacing(2.5),
+  },
+  domainUrl: {
+    color: theme.colors.ok,
+    fontSize: 13,
+    fontFamily: theme.font.mono,
+    flex: 1,
+    flexShrink: 1,
+  },
+  allocateBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: theme.spacing(2),
+    backgroundColor: theme.colors.surfaceAlt,
+    borderRadius: theme.radius.sm,
+    paddingVertical: theme.spacing(2.5),
+  },
+  allocateText: {
+    color: theme.colors.accent,
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  domainPanel: {
+    backgroundColor: theme.colors.bg,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    padding: theme.spacing(3),
+    gap: theme.spacing(2),
+  },
+  domainHint: {
+    color: theme.colors.textDim,
+    fontSize: 12,
+    lineHeight: 18,
+  },
+  zoneList: {
+    gap: theme.spacing(2),
+  },
+  zoneRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing(2),
+    backgroundColor: theme.colors.surfaceAlt,
+    borderRadius: theme.radius.sm,
+    paddingHorizontal: theme.spacing(3),
+    paddingVertical: theme.spacing(2.5),
+  },
+  zoneName: {
+    color: theme.colors.text,
+    fontSize: 13,
+    fontFamily: theme.font.mono,
+    flex: 1,
+    flexShrink: 1,
   },
 });

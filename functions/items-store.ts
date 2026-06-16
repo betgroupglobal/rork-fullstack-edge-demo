@@ -44,6 +44,8 @@ export type Proxy = {
   targetUrl: string;
   enabled: boolean;
   hits: number;
+  /** A purchased Cloudflare domain allocated to route this target, e.g. "api.example.com". */
+  proxyDomain: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -55,6 +57,7 @@ type ProxyRow = {
   target_url: string;
   enabled: number;
   hits: number;
+  proxy_domain: string;
   created_at: number;
   updated_at: number;
 };
@@ -128,10 +131,19 @@ export class ItemsStore extends DurableObject {
         target_url TEXT NOT NULL,
         enabled INTEGER NOT NULL DEFAULT 1,
         hits INTEGER NOT NULL DEFAULT 0,
+        proxy_domain TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       )
     `);
+    // Migration for stores created before the proxy_domain column existed.
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE proxies ADD COLUMN proxy_domain TEXT NOT NULL DEFAULT ''",
+      );
+    } catch {
+      // Column already exists — nothing to do.
+    }
     this.startedAt = Date.now();
   }
 
@@ -221,9 +233,23 @@ export class ItemsStore extends DurableObject {
       targetUrl: row.target_url,
       enabled: row.enabled === 1,
       hits: row.hits,
+      proxyDomain: row.proxy_domain ?? "",
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  /** Set (or clear) the allocated proxy domain for a target by id. */
+  private setProxyDomain(id: number, proxyDomain: string): Proxy | null {
+    const existing = this.findProxy(id);
+    if (!existing) return null;
+    this.ctx.storage.sql.exec(
+      "UPDATE proxies SET proxy_domain = ?, updated_at = ? WHERE id = ?",
+      proxyDomain,
+      Date.now(),
+      id,
+    );
+    return this.findProxy(id);
   }
 
   private listProxies(): Proxy[] {
@@ -302,6 +328,22 @@ export class ItemsStore extends DurableObject {
       const body = (await this.safeJson(request)) as { slug?: string } | null;
       if (body?.slug) this.incrementProxyHits(body.slug);
       return new Response(null, { status: 204 });
+    }
+
+    // Internal: allocate / clear an allocated proxy domain for a target.
+    if (path === "/__proxy-domain" && method === "POST") {
+      const body = (await this.safeJson(request)) as {
+        id?: number;
+        proxyDomain?: string;
+      } | null;
+      if (!body?.id) {
+        return Response.json({ success: false }, { status: 400 });
+      }
+      const updated = this.setProxyDomain(body.id, (body.proxyDomain ?? "").trim());
+      if (!updated) {
+        return Response.json({ success: false }, { status: 404 });
+      }
+      return Response.json({ success: true, data: updated });
     }
 
     const ip = request.headers.get("X-Client-IP") ?? "anonymous";
@@ -440,11 +482,16 @@ export class ItemsStore extends DurableObject {
           body?.name !== undefined ? String(body.name).trim() : existing.name;
         const enabled =
           body?.enabled !== undefined ? (body.enabled ? 1 : 0) : existing.enabled ? 1 : 0;
+        const proxyDomain =
+          body?.proxyDomain !== undefined
+            ? String(body.proxyDomain).trim()
+            : existing.proxyDomain;
         this.ctx.storage.sql.exec(
-          "UPDATE proxies SET name = ?, target_url = ?, enabled = ?, updated_at = ? WHERE id = ?",
+          "UPDATE proxies SET name = ?, target_url = ?, enabled = ?, proxy_domain = ?, updated_at = ? WHERE id = ?",
           name || existing.name,
           targetUrl,
           enabled,
+          proxyDomain,
           Date.now(),
           id,
         );

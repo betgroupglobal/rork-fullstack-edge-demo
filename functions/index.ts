@@ -8,7 +8,176 @@ type Env = {
   DO: Fetcher;
   /** Default upstream origin for the reverse proxy, e.g. "https://example.com". */
   PROXY_TARGET?: string;
+  /** Cloudflare Global API Key (used with CF_API_EMAIL). */
+  CF_API_KEY?: string;
+  /** Cloudflare account email that owns CF_API_KEY. */
+  CF_API_EMAIL?: string;
+  /** Optional scoped API token (Bearer) used instead of the global key. */
+  CF_API_TOKEN?: string;
 };
+
+const CF_API = "https://api.cloudflare.com/client/v4";
+
+/**
+ * Build Cloudflare API auth headers from the configured credentials. A scoped
+ * Bearer token wins if present, otherwise the global key + account email is
+ * used. Returns null when nothing is configured.
+ */
+function cfAuthHeaders(env: Env): Record<string, string> | null {
+  if (env.CF_API_TOKEN) {
+    return { Authorization: `Bearer ${env.CF_API_TOKEN}` };
+  }
+  if (env.CF_API_KEY && env.CF_API_EMAIL) {
+    return { "X-Auth-Email": env.CF_API_EMAIL, "X-Auth-Key": env.CF_API_KEY };
+  }
+  return null;
+}
+
+type CfApiResponse<T> = {
+  success: boolean;
+  result?: T;
+  errors?: { code: number; message: string }[];
+};
+
+type CfZone = { id: string; name: string; status: string };
+
+/** List the purchased domains (zones) in the configured Cloudflare account. */
+async function listZones(env: Env): Promise<Response> {
+  const auth = cfAuthHeaders(env);
+  if (!auth) {
+    return decorate(
+      Response.json(
+        { success: false, configured: false, error: "Cloudflare credentials not configured" },
+        { status: 200 },
+      ),
+    );
+  }
+  try {
+    const res = await fetch(`${CF_API}/zones?per_page=50&status=active`, {
+      headers: auth,
+    });
+    const json = (await res.json()) as CfApiResponse<CfZone[]>;
+    if (!json.success) {
+      return decorate(
+        Response.json(
+          {
+            success: false,
+            configured: true,
+            error: json.errors?.[0]?.message ?? "Cloudflare API rejected the request",
+          },
+          { status: 502 },
+        ),
+      );
+    }
+    const zones = (json.result ?? []).map((z) => ({
+      id: z.id,
+      name: z.name,
+      status: z.status,
+    }));
+    return decorate(Response.json({ success: true, configured: true, data: zones }));
+  } catch {
+    return decorate(
+      Response.json(
+        { success: false, configured: true, error: "could not reach the Cloudflare API" },
+        { status: 502 },
+      ),
+    );
+  }
+}
+
+/** Persist an allocated proxy domain onto a target in the Durable Object. */
+function setProxyDomain(
+  env: Env,
+  id: number,
+  proxyDomain: string,
+): Promise<Response> {
+  const req = new Request("https://do/__proxy-domain", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ id, proxyDomain }),
+  });
+  req.headers.set("X-Rork-DO-Class", "ItemsStore");
+  req.headers.set("X-Rork-DO-Id", STORE_ID);
+  return env.DO.fetch(req);
+}
+
+/**
+ * Allocate a purchased Cloudflare domain to a proxy target. Creates a proxied
+ * CNAME record in the chosen zone pointing at this gateway host, then records
+ * the hostname on the target so the app can surface it. Body:
+ * `{ proxyId, zoneId, hostname }`.
+ */
+async function allocateDomain(request: Request, env: Env): Promise<Response> {
+  const auth = cfAuthHeaders(env);
+  if (!auth) {
+    return decorate(
+      Response.json(
+        { success: false, configured: false, error: "Cloudflare credentials not configured" },
+        { status: 400 },
+      ),
+    );
+  }
+  const body = (await request.json().catch(() => null)) as {
+    proxyId?: number;
+    zoneId?: string;
+    hostname?: string;
+  } | null;
+  const proxyId = Number(body?.proxyId);
+  const zoneId = (body?.zoneId ?? "").toString().trim();
+  const hostname = (body?.hostname ?? "").toString().trim().toLowerCase();
+  if (!proxyId || !zoneId || !hostname || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(hostname)) {
+    return decorate(
+      Response.json(
+        { success: false, error: "proxyId, zoneId and a valid hostname are required" },
+        { status: 400 },
+      ),
+    );
+  }
+  const gatewayHost = new URL(request.url).host;
+  try {
+    const res = await fetch(`${CF_API}/zones/${zoneId}/dns_records`, {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "CNAME",
+        name: hostname,
+        content: gatewayHost,
+        proxied: true,
+        ttl: 1,
+        comment: "Edge Gateway Dashboard proxy domain",
+      }),
+    });
+    const json = (await res.json()) as CfApiResponse<{ id: string; name: string }>;
+    if (!json.success) {
+      const message = json.errors?.[0]?.message ?? "could not create DNS record";
+      return decorate(
+        Response.json({ success: false, error: message }, { status: 502 }),
+      );
+    }
+    const stored = await setProxyDomain(env, proxyId, hostname);
+    const storedJson = (await stored.json().catch(() => null)) as {
+      data?: unknown;
+    } | null;
+    return decorate(
+      Response.json({
+        success: true,
+        data: {
+          hostname,
+          target: gatewayHost,
+          record: json.result,
+          proxy: storedJson?.data ?? null,
+        },
+      }),
+    );
+  } catch {
+    return decorate(
+      Response.json(
+        { success: false, error: "could not reach the Cloudflare API" },
+        { status: 502 },
+      ),
+    );
+  }
+}
 
 const RATE_LIMIT_REQUESTS = 100;
 const RATE_LIMIT_WINDOW = 60; // seconds
@@ -340,6 +509,13 @@ export default {
       );
       if (proxy) ctx.waitUntil(bumpProxyHits(env, proxy));
       return proxied;
+    }
+
+    if (path === "/api/cloudflare/zones" && method === "GET") {
+      return await listZones(env);
+    }
+    if (path === "/api/cloudflare/allocate" && method === "POST") {
+      return await allocateDomain(request, env);
     }
 
     const isTraffic = path === "/api/traffic";
