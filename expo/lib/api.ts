@@ -151,6 +151,10 @@ export type Proxy = {
   cfZoneId: string;
   /** Cloudflare DNS record ID for the allocated CNAME (for cleanup). */
   cfRecordId: string;
+  /** Custom JS snippet injected into proxied HTML pages. */
+  injectJs: string;
+  /** Whether the custom JS snippet is active. */
+  injectJsEnabled: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -240,7 +244,7 @@ export async function createProxy(input: {
 
 export async function updateProxy(
   id: number,
-  input: Partial<{ name: string; targetUrl: string; enabled: boolean; interceptEnabled: boolean }>,
+  input: Partial<{ name: string; targetUrl: string; enabled: boolean; interceptEnabled: boolean; injectJs: string; injectJsEnabled: boolean }>,
   authHeader?: string,
 ): Promise<Proxy> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };

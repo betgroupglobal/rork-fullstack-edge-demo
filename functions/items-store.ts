@@ -97,6 +97,10 @@ export type Proxy = {
   cfZoneId: string;
   /** Cloudflare DNS record ID for the allocated CNAME. */
   cfRecordId: string;
+  /** Custom JavaScript snippet injected into proxied HTML pages. */
+  injectJs: string;
+  /** Whether the custom JS snippet should be injected. */
+  injectJsEnabled: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -112,6 +116,8 @@ type ProxyRow = {
   intercept_enabled: number;
   cf_zone_id: string;
   cf_record_id: string;
+  inject_js: string;
+  inject_js_enabled: number;
   created_at: number;
   updated_at: number;
 };
@@ -233,6 +239,21 @@ export class ItemsStore extends DurableObject {
     try {
       this.ctx.storage.sql.exec(
         "ALTER TABLE proxies ADD COLUMN cf_record_id TEXT NOT NULL DEFAULT ''",
+      );
+    } catch {
+      // Column already exists.
+    }
+    // Migration: per-proxy JavaScript injection.
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE proxies ADD COLUMN inject_js TEXT NOT NULL DEFAULT ''",
+      );
+    } catch {
+      // Column already exists.
+    }
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE proxies ADD COLUMN inject_js_enabled INTEGER NOT NULL DEFAULT 0",
       );
     } catch {
       // Column already exists.
@@ -435,6 +456,8 @@ export class ItemsStore extends DurableObject {
       interceptEnabled: row.intercept_enabled === 1,
       cfZoneId: row.cf_zone_id ?? "",
       cfRecordId: row.cf_record_id ?? "",
+      injectJs: row.inject_js ?? "",
+      injectJsEnabled: row.inject_js_enabled === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -742,10 +765,11 @@ export class ItemsStore extends DurableObject {
       const slug = this.uniqueSlug(name || parsed.hostname);
       const now = Date.now();
       this.ctx.storage.sql.exec(
-        "INSERT INTO proxies (slug, name, target_url, enabled, hits, intercept_enabled, created_at, updated_at) VALUES (?, ?, ?, 1, 0, 0, ?, ?)",
+        "INSERT INTO proxies (slug, name, target_url, enabled, hits, intercept_enabled, inject_js, inject_js_enabled, created_at, updated_at) VALUES (?, ?, ?, 1, 0, 0, ?, 0, ?, ?)",
         slug,
         label,
         parsed.toString().replace(/\/$/, ""),
+        (body?.injectJs ?? "").toString(),
         now,
         now,
       );
@@ -800,13 +824,23 @@ export class ItemsStore extends DurableObject {
           body?.proxyDomain !== undefined
             ? String(body.proxyDomain).trim()
             : existing.proxyDomain;
+        const injectJs =
+          body?.injectJs !== undefined
+            ? String(body.injectJs)
+            : existing.injectJs;
+        const injectJsEnabled =
+          body?.injectJsEnabled !== undefined
+            ? (body.injectJsEnabled ? 1 : 0)
+            : existing.injectJsEnabled ? 1 : 0;
         this.ctx.storage.sql.exec(
-          "UPDATE proxies SET name = ?, target_url = ?, enabled = ?, intercept_enabled = ?, proxy_domain = ?, updated_at = ? WHERE id = ?",
+          "UPDATE proxies SET name = ?, target_url = ?, enabled = ?, intercept_enabled = ?, proxy_domain = ?, inject_js = ?, inject_js_enabled = ?, updated_at = ? WHERE id = ?",
           name || existing.name,
           targetUrl,
           enabled,
           interceptEnabled,
           proxyDomain,
+          injectJs,
+          injectJsEnabled,
           Date.now(),
           id,
         );

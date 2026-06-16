@@ -93,7 +93,7 @@ export function useCreateProxy(authHeader?: string): UseMutationResult<
 export function useUpdateProxy(authHeader?: string): UseMutationResult<
   Proxy,
   Error,
-  { id: number; name?: string; targetUrl?: string; enabled?: boolean; interceptEnabled?: boolean }
+  { id: number; name?: string; targetUrl?: string; enabled?: boolean; interceptEnabled?: boolean; injectJs?: string; injectJsEnabled?: boolean }
 > {
   const queryClient = useQueryClient();
   return useMutation({
