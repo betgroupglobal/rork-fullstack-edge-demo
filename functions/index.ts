@@ -91,16 +91,18 @@ async function listZones(env: Env): Promise<Response> {
   }
 }
 
-/** Persist an allocated proxy domain onto a target in the Durable Object. */
+/** Persist an allocated proxy domain onto a target in the Durable Object, including CF record tracking for cleanup. */
 function setProxyDomain(
   env: Env,
   id: number,
   proxyDomain: string,
+  cfZoneId?: string,
+  cfRecordId?: string,
 ): Promise<Response> {
   const req = new Request("https://do/__proxy-domain", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ id, proxyDomain }),
+    body: JSON.stringify({ id, proxyDomain, cfZoneId, cfRecordId }),
   });
   req.headers.set("X-Rork-DO-Class", "ItemsStore");
   req.headers.set("X-Rork-DO-Id", STORE_ID);
@@ -160,7 +162,13 @@ async function allocateDomain(request: Request, env: Env): Promise<Response> {
         Response.json({ success: false, error: message }, { status: 502 }),
       );
     }
-    const stored = await setProxyDomain(env, proxyId, hostname);
+    const stored = await setProxyDomain(
+      env,
+      proxyId,
+      hostname,
+      zoneId,
+      json.result?.id ?? "",
+    );
     const storedJson = (await stored.json().catch(() => null)) as {
       data?: unknown;
     } | null;
@@ -189,6 +197,7 @@ const RATE_LIMIT_REQUESTS = 100;
 const RATE_LIMIT_WINDOW = 60; // seconds
 const CACHE_TTL = 10; // seconds
 const GATEWAY_VERSION = "1.0.0";
+const INTERCEPT_BODY_MAX_BYTES = 16_384; // Cap per-body read for intercept captures.
 
 // Hop-by-hop headers must never be forwarded between client <-> origin.
 const HOP_BY_HOP = new Set([
@@ -248,6 +257,86 @@ type ProxyConfig = {
   interceptEnabled: boolean;
 };
 
+/** Look up a proxy from the DO by its numeric id (internal). */
+async function resolveProxyById(
+  env: Env,
+  id: number,
+): Promise<ProxyConfig & { proxyDomain?: string; cfZoneId?: string; cfRecordId?: string } | null> {
+  const req = new Request(`https://do/__proxy-by-id?id=${id}`);
+  req.headers.set("X-Rork-DO-Class", "ItemsStore");
+  req.headers.set("X-Rork-DO-Id", STORE_ID);
+  const res = await env.DO.fetch(req);
+  if (!res.ok) return null;
+  const json = (await res.json()) as {
+    data?: ProxyConfig & { proxyDomain?: string; cfZoneId?: string; cfRecordId?: string };
+  };
+  return json.data ?? null;
+}
+
+/**
+ * Delete a Cloudflare DNS record by zone and record id. Best-effort —
+ * failures are logged but never thrown, so a delete always proceeds.
+ */
+async function deleteDnsRecord(
+  env: Env,
+  zoneId: string,
+  recordId: string,
+): Promise<void> {
+  const auth = cfAuthHeaders(env);
+  if (!auth || !zoneId || !recordId) return;
+  try {
+    await fetch(`${CF_API}/zones/${zoneId}/dns_records/${recordId}`, {
+      method: "DELETE",
+      headers: auth,
+    });
+  } catch {
+    // Best-effort — don't block proxy deletion on CF API flakiness.
+  }
+}
+
+/**
+ * Auto-allocate a Cloudflare domain for a newly created proxy. Picks the
+ * first active zone and creates a CNAME record pointing at the gateway.
+ * Runs inside ctx.waitUntil so the client gets the initial 201 immediately.
+ */
+async function autoAllocateDomain(
+  env: Env,
+  proxyId: number,
+  slug: string,
+  gatewayHost: string,
+): Promise<void> {
+  const auth = cfAuthHeaders(env);
+  if (!auth) return;
+  const zonesRes = await fetch(`${CF_API}/zones?per_page=5&status=active`, {
+    headers: auth,
+  }).catch(() => null);
+  if (!zonesRes?.ok) return;
+  const zonesJson = (await zonesRes.json()) as CfApiResponse<CfZone[]>;
+  const zone = zonesJson.result?.[0];
+  if (!zone) return;
+  const hostname = `${slug}.${zone.name}`;
+  const dnsRes = await fetch(
+    `${CF_API}/zones/${zone.id}/dns_records`,
+    {
+      method: "POST",
+      headers: { ...auth, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        type: "CNAME",
+        name: hostname,
+        content: gatewayHost,
+        proxied: true,
+        ttl: 1,
+        comment: "Edge Gateway Dashboard — auto-allocated",
+      }),
+    },
+  ).catch(() => null);
+  if (!dnsRes?.ok) return;
+  const dnsJson = (await dnsRes.json()) as CfApiResponse<{ id: string }>;
+  if (dnsJson.success && dnsJson.result) {
+    await setProxyDomain(env, proxyId, hostname, zone.id, dnsJson.result.id);
+  }
+}
+
 /** Resolve a configured proxy target by slug from the Durable Object. */
 async function resolveProxy(env: Env, slug: string): Promise<ProxyConfig | null> {
   const req = new Request(`https://do/__proxy?slug=${encodeURIComponent(slug)}`);
@@ -285,6 +374,36 @@ function logTraffic(request: Request, env: Env, entry: TrafficLog): Promise<void
   log.headers.set("X-Rork-DO-Class", "ItemsStore");
   log.headers.set("X-Rork-DO-Id", STORE_ID);
   return env.DO.fetch(log).then(() => undefined);
+}
+
+/**
+ * Intercept capture — fire-and-forget write of a proxied request/response
+ * payload pair into durable storage. Only called when lab mode is on and the
+ * resolved proxy has intercept enabled.
+ */
+function logIntercept(
+  env: Env,
+  entry: {
+    ts: number;
+    slug: string;
+    method: string;
+    path: string;
+    reqHeaders: string;
+    reqBody: string;
+    respStatus: number;
+    respHeaders: string;
+    respBody: string;
+    host: string;
+  },
+): Promise<void> {
+  const ic = new Request("https://do/__intercept", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(entry),
+  });
+  ic.headers.set("X-Rork-DO-Class", "ItemsStore");
+  ic.headers.set("X-Rork-DO-Id", STORE_ID);
+  return env.DO.fetch(ic).then(() => undefined);
 }
 
 function buildTrafficEntry(
@@ -456,6 +575,43 @@ async function reverseProxy(
     for (const name of HOP_BY_HOP) respHeaders.delete(name);
     respHeaders.set("X-Proxied-By", "edge-gateway-dashboard");
     if (proxyLabel) respHeaders.set("X-Proxy-Target", proxyLabel);
+
+    // Intercept capture: only if lab mode is on AND this proxy has intercept
+    // enabled. We read limited request/response bodies asynchronously so the
+    // client response is never delayed.
+    const labOn = env.INTERCEPT_LAB_MODE === "true";
+    const interceptProxy = segments.length > 0
+      ? await resolveProxy(env, segments[0])
+      : null;
+    const shouldIntercept = labOn && interceptProxy?.interceptEnabled;
+
+    let interceptPromise: Promise<void> | undefined;
+    if (shouldIntercept) {
+      const incomingHeaders = new Headers(request.headers);
+      for (const name of HOP_BY_HOP) incomingHeaders.delete(name);
+      const reqBody = request.clone().text().then(
+        (t) => t.slice(0, INTERCEPT_BODY_MAX_BYTES),
+      ).catch(() => "");
+      const respBody = response.clone().text().then(
+        (t) => t.slice(0, INTERCEPT_BODY_MAX_BYTES),
+      ).catch(() => "");
+      interceptPromise = Promise.all([reqBody, respBody]).then(
+        ([reqB, respB]) =>
+          logIntercept(env, {
+            ts: Date.now(),
+            slug: proxyLabel,
+            method: request.method,
+            path: target.pathname + (target.search || ""),
+            reqHeaders: JSON.stringify(Object.fromEntries(incomingHeaders.entries())),
+            reqBody: reqB,
+            respStatus: response.status,
+            respHeaders: JSON.stringify(Object.fromEntries(respHeaders.entries())),
+            respBody: respB,
+            host: target.host,
+          }),
+      );
+    }
+
     return {
       proxy: proxyLabel,
       response: decorate(
@@ -465,6 +621,7 @@ async function reverseProxy(
           headers: respHeaders,
         }),
       ),
+      interceptPromise,
     };
   } catch {
     return {
@@ -506,7 +663,7 @@ export default {
       "anonymous";
 
     if (path === "/proxy" || path.startsWith("/proxy/")) {
-      const { response: proxied, proxy } = await reverseProxy(request, env);
+      const { response: proxied, proxy, interceptPromise } = await reverseProxy(request, env);
       ctx.waitUntil(
         logTraffic(
           request,
@@ -515,6 +672,7 @@ export default {
         ),
       );
       if (proxy) ctx.waitUntil(bumpProxyHits(env, proxy));
+      if (interceptPromise) ctx.waitUntil(interceptPromise);
       return proxied;
     }
 
@@ -525,12 +683,30 @@ export default {
       return await allocateDomain(request, env);
     }
 
+    // Intercept DELETE on a proxy target so we can clean up the Cloudflare
+    // DNS record before the row is removed from durable storage.
+    const proxyDeleteMatch = path.match(/^\/api\/proxies\/(\d+)$/);
+    if (proxyDeleteMatch && method === "DELETE") {
+      const id = Number(proxyDeleteMatch[1]);
+      const proxy = await resolveProxyById(env, id);
+      if (proxy?.cfZoneId && proxy.cfRecordId) {
+        ctx.waitUntil(deleteDnsRecord(env, proxy.cfZoneId, proxy.cfRecordId));
+      }
+      // Fall through to dispatch — DO handles the actual row deletion.
+    }
+
+    // Intercept POST /api/proxies so we can auto-allocate a Cloudflare
+    // domain after the DO creates the record.
+    const isProxyCreate = path === "/api/proxies" && method === "POST";
+
     const isTraffic = path === "/api/traffic";
+    const isIntercepts = path === "/api/intercepts";
     const isProxyConfig = path === "/api/proxies" || /^\/api\/proxies\/\d+$/.test(path);
     if (
       path !== "/health" &&
       !path.startsWith("/api/items") &&
       !isTraffic &&
+      !isIntercepts &&
       !isProxyConfig
     ) {
       return decorate(
@@ -554,6 +730,23 @@ export default {
       extra["X-Cache"] = "BYPASS";
     }
     const decorated = decorate(response, extra);
+
+    // Auto-allocate a Cloudflare domain when a new proxy is created, so the
+    // user doesn't have to manually pick a zone — the gateway handles it.
+    if (isProxyCreate && decorated.ok) {
+      const cloned = decorated.clone();
+      ctx.waitUntil(
+        cloned
+          .json()
+          .then((json: { data?: { id: number; slug: string } }) => {
+            const proxy = json?.data;
+            if (proxy?.id && proxy?.slug) {
+              return autoAllocateDomain(env, proxy.id, proxy.slug, url.host);
+            }
+          })
+          .catch(() => undefined),
+      );
+    }
 
     // Intercept everything except reads of the analyser feed and proxy config
     // management, so the traffic view doesn't fill up with its own polling.

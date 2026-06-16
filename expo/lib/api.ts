@@ -124,6 +124,12 @@ export type Proxy = {
   hits: number;
   /** A purchased Cloudflare domain allocated to route this target. */
   proxyDomain: string;
+  /** Whether intercept lab mode should capture payloads for this target. */
+  interceptEnabled: boolean;
+  /** Cloudflare zone ID where the proxy DNS record lives (for cleanup). */
+  cfZoneId: string;
+  /** Cloudflare DNS record ID for the allocated CNAME (for cleanup). */
+  cfRecordId: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -211,7 +217,7 @@ export async function createProxy(input: {
 
 export async function updateProxy(
   id: number,
-  input: Partial<{ name: string; targetUrl: string; enabled: boolean }>,
+  input: Partial<{ name: string; targetUrl: string; enabled: boolean; interceptEnabled: boolean }>,
 ): Promise<Proxy> {
   const response = await fetch(`${BASE_URL}/api/proxies/${id}`, {
     method: "PUT",
@@ -227,6 +233,45 @@ export async function deleteProxy(id: number): Promise<void> {
     method: "DELETE",
   });
   await parse<{ data: Proxy }>(response);
+}
+
+export type InterceptCapture = {
+  id: number;
+  ts: number;
+  slug: string;
+  method: string;
+  path: string;
+  reqHeaders: string;
+  reqBody: string;
+  respStatus: number;
+  respHeaders: string;
+  respBody: string;
+  host: string;
+};
+
+/** Lists all intercept captures from the gateway. */
+export async function fetchIntercepts(): Promise<InterceptCapture[]> {
+  const response = await fetch(`${BASE_URL}/api/intercepts`, {
+    cache: "no-store",
+    headers: { "X-Intercept-TTL": "600" },
+  });
+  const data = await parse<{ data: InterceptCapture[]; count: number }>(response);
+  return data.data;
+}
+
+/** Wipes all intercept captures from the gateway. */
+export async function deleteIntercepts(): Promise<void> {
+  const response = await fetch(`${BASE_URL}/api/intercepts`, {
+    method: "DELETE",
+  });
+  await parse<{ success: boolean }>(response);
+}
+
+export async function deleteItem(id: number): Promise<void> {
+  const response = await fetch(`${BASE_URL}/api/items/${id}`, {
+    method: "DELETE",
+  });
+  await parse<{ data: Item }>(response);
 }
 
 export type TrafficStats = {
@@ -255,9 +300,15 @@ export async function fetchTraffic(): Promise<TrafficResult> {
   };
 }
 
-export async function deleteItem(id: number): Promise<void> {
-  const response = await fetch(`${BASE_URL}/api/items/${id}`, {
-    method: "DELETE",
-  });
-  await parse<{ data: Item }>(response);
+/** Sensitive-field patterns for masking in the UI. */
+export const SENSITIVE_FIELDS = [
+  "password", "passwd", "secret", "token", "api_key", "apikey",
+  "authorization", "session", "cookie", "jwt", "bearer",
+  "access_token", "refresh_token", "id_token", "private_key",
+];
+
+/** Mask a value by showing first 2 and last 2 characters. */
+export function maskValue(value: string): string {
+  if (!value || value.length <= 6) return "***";
+  return `${value.slice(0, 2)}${'*'.repeat(Math.min(value.length - 4, 12))}${value.slice(-2)}`;
 }

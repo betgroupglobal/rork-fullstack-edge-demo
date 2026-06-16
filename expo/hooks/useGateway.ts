@@ -10,16 +10,19 @@ import {
   allocateProxyDomain,
   createItem,
   createProxy,
+  deleteIntercepts,
   deleteItem,
   deleteProxy,
   fetchCloudflareZones,
   fetchHealth,
+  fetchIntercepts,
   fetchItems,
   fetchProxies,
   fetchTraffic,
   updateItem,
   updateProxy,
   type HealthResult,
+  type InterceptCapture,
   type Item,
   type ItemsResult,
   type Proxy,
@@ -33,6 +36,7 @@ export const queryKeys = {
   traffic: ["traffic"] as const,
   proxies: ["proxies"] as const,
   zones: ["cloudflare-zones"] as const,
+  intercepts: ["intercepts"] as const,
 };
 
 export function useCloudflareZones(): UseQueryResult<ZonesResult, Error> {
@@ -84,7 +88,7 @@ export function useCreateProxy(): UseMutationResult<
 export function useUpdateProxy(): UseMutationResult<
   Proxy,
   Error,
-  { id: number; name?: string; targetUrl?: string; enabled?: boolean }
+  { id: number; name?: string; targetUrl?: string; enabled?: boolean; interceptEnabled?: boolean }
 > {
   const queryClient = useQueryClient();
   return useMutation({
@@ -168,6 +172,25 @@ export function useDeleteItem(): UseMutationResult<void, Error, number> {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.items });
       queryClient.invalidateQueries({ queryKey: queryKeys.health });
+    },
+  });
+}
+
+export function useIntercepts(): UseQueryResult<InterceptCapture[], Error> {
+  return useQuery({
+    queryKey: queryKeys.intercepts,
+    queryFn: fetchIntercepts,
+    refetchInterval: 5000,
+    retry: 1,
+  });
+}
+
+export function useDeleteIntercepts(): UseMutationResult<void, Error, void> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: deleteIntercepts,
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.intercepts });
     },
   });
 }

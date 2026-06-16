@@ -77,6 +77,10 @@ export type Proxy = {
   proxyDomain: string;
   /** Whether intercept lab mode should capture payloads for this target. */
   interceptEnabled: boolean;
+  /** Cloudflare zone ID where the proxy DNS record lives. */
+  cfZoneId: string;
+  /** Cloudflare DNS record ID for the allocated CNAME. */
+  cfRecordId: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -90,6 +94,8 @@ type ProxyRow = {
   hits: number;
   proxy_domain: string;
   intercept_enabled: number;
+  cf_zone_id: string;
+  cf_record_id: string;
   created_at: number;
   updated_at: number;
 };
@@ -186,6 +192,21 @@ export class ItemsStore extends DurableObject {
     try {
       this.ctx.storage.sql.exec(
         "ALTER TABLE proxies ADD COLUMN intercept_enabled INTEGER NOT NULL DEFAULT 0",
+      );
+    } catch {
+      // Column already exists.
+    }
+    // Migration: Cloudflare record tracking for auto-cleanup on delete.
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE proxies ADD COLUMN cf_zone_id TEXT NOT NULL DEFAULT ''",
+      );
+    } catch {
+      // Column already exists.
+    }
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE proxies ADD COLUMN cf_record_id TEXT NOT NULL DEFAULT ''",
       );
     } catch {
       // Column already exists.
@@ -346,18 +367,27 @@ export class ItemsStore extends DurableObject {
       hits: row.hits,
       proxyDomain: row.proxy_domain ?? "",
       interceptEnabled: row.intercept_enabled === 1,
+      cfZoneId: row.cf_zone_id ?? "",
+      cfRecordId: row.cf_record_id ?? "",
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
   }
 
-  /** Set (or clear) the allocated proxy domain for a target by id. */
-  private setProxyDomain(id: number, proxyDomain: string): Proxy | null {
+  /** Set (or clear) the allocated proxy domain for a target by id, including CF record tracking. */
+  private setProxyDomain(
+    id: number,
+    proxyDomain: string,
+    cfZoneId?: string,
+    cfRecordId?: string,
+  ): Proxy | null {
     const existing = this.findProxy(id);
     if (!existing) return null;
     this.ctx.storage.sql.exec(
-      "UPDATE proxies SET proxy_domain = ?, updated_at = ? WHERE id = ?",
+      "UPDATE proxies SET proxy_domain = ?, cf_zone_id = ?, cf_record_id = ?, updated_at = ? WHERE id = ?",
       proxyDomain,
+      cfZoneId ?? "",
+      cfRecordId ?? "",
       Date.now(),
       id,
     );
@@ -445,6 +475,16 @@ export class ItemsStore extends DurableObject {
       return Response.json({ success: true, data: proxy });
     }
 
+    // Internal proxy resolution by id — used for DNS cleanup on delete.
+    if (path === "/__proxy-by-id" && method === "GET") {
+      const id = Number(url.searchParams.get("id") ?? 0);
+      const proxy = this.findProxy(id);
+      if (!proxy) {
+        return Response.json({ success: false }, { status: 404 });
+      }
+      return Response.json({ success: true, data: proxy });
+    }
+
     // Internal hit counter bump for a proxy target.
     if (path === "/__proxy-hit" && method === "POST") {
       const body = (await this.safeJson(request)) as { slug?: string } | null;
@@ -457,11 +497,18 @@ export class ItemsStore extends DurableObject {
       const body = (await this.safeJson(request)) as {
         id?: number;
         proxyDomain?: string;
+        cfZoneId?: string;
+        cfRecordId?: string;
       } | null;
       if (!body?.id) {
         return Response.json({ success: false }, { status: 400 });
       }
-      const updated = this.setProxyDomain(body.id, (body.proxyDomain ?? "").trim());
+      const updated = this.setProxyDomain(
+        body.id,
+        (body.proxyDomain ?? "").trim(),
+        body.cfZoneId,
+        body.cfRecordId,
+      );
       if (!updated) {
         return Response.json({ success: false }, { status: 404 });
       }

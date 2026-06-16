@@ -2,6 +2,7 @@ import * as Clipboard from "expo-clipboard";
 import { LinearGradient } from "expo-linear-gradient";
 import {
   ArrowRight,
+  Bug,
   Check,
   Copy,
   Globe,
@@ -131,6 +132,7 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
   const [copied, setCopied] = useState<boolean>(false);
   const [domainCopied, setDomainCopied] = useState<boolean>(false);
   const [showDomains, setShowDomains] = useState<boolean>(false);
+  const [_, setAllocating] = useState<boolean>(false);
 
   const url = proxyUrl(proxy.slug);
   const domainUrl = proxy.proxyDomain ? `https://${proxy.proxyDomain}` : "";
@@ -151,6 +153,10 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
   const toggle = useCallback(() => {
     updateProxy.mutate({ id: proxy.id, enabled: !proxy.enabled });
   }, [updateProxy, proxy.id, proxy.enabled]);
+
+  const toggleIntercept = useCallback(() => {
+    updateProxy.mutate({ id: proxy.id, interceptEnabled: !proxy.interceptEnabled });
+  }, [updateProxy, proxy.id, proxy.interceptEnabled]);
 
   const remove = useCallback(() => {
     const run = () => deleteProxy.mutate(proxy.id);
@@ -256,6 +262,34 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
             ]}
           >
             {proxy.enabled ? "Disable" : "Enable"}
+          </Text>
+        </Pressable>
+        <Pressable
+          onPress={toggleIntercept}
+          disabled={updateProxy.isPending}
+          style={({ pressed }) => [
+            styles.actionBtnSm,
+            pressed && styles.pressed,
+            proxy.interceptEnabled && styles.actionBtnSmWarn,
+          ]}
+        >
+          <Bug
+            size={12}
+            color={
+              proxy.interceptEnabled ? theme.colors.warn : theme.colors.textFaint
+            }
+          />
+          <Text
+            style={[
+              styles.actionTextSm,
+              {
+                color: proxy.interceptEnabled
+                  ? theme.colors.warn
+                  : theme.colors.textDim,
+              },
+            ]}
+          >
+            {proxy.interceptEnabled ? "On" : "Off"}
           </Text>
         </Pressable>
         <Pressable
@@ -641,6 +675,24 @@ const styles = StyleSheet.create({
   },
   actionText: {
     fontSize: 13,
+    fontWeight: "700",
+  },
+  actionBtnSm: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: theme.spacing(1.5),
+    backgroundColor: theme.colors.surfaceAlt,
+    borderRadius: theme.radius.sm,
+    paddingHorizontal: theme.spacing(2.5),
+    paddingVertical: theme.spacing(2.5),
+  },
+  actionBtnSmWarn: {
+    borderWidth: 1,
+    borderColor: theme.colors.warn,
+  },
+  actionTextSm: {
+    fontSize: 11,
     fontWeight: "700",
   },
   pressed: {
