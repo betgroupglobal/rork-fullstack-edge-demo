@@ -14,6 +14,12 @@ type Env = {
   CF_API_EMAIL?: string;
   /** Optional scoped API token (Bearer) used instead of the global key. */
   CF_API_TOKEN?: string;
+  /** When "true", the gateway inspects proxied payloads for intercept captures. */
+  INTERCEPT_LAB_MODE?: string;
+  /** Comma-separated upstream hostname allowlist for intercept captures. */
+  INTERCEPT_ALLOWLIST?: string;
+  /** TTL in seconds for intercept captures (default: 600 = 10 min). */
+  INTERCEPT_TTL_SECONDS?: string;
 };
 
 const CF_API = "https://api.cloudflare.com/client/v4";
@@ -239,6 +245,7 @@ type ProxyConfig = {
   name: string;
   targetUrl: string;
   enabled: boolean;
+  interceptEnabled: boolean;
 };
 
 /** Resolve a configured proxy target by slug from the Durable Object. */

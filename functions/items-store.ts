@@ -22,6 +22,35 @@ export type TrafficEntry = {
   proxy: string;
 };
 
+/** A single intercept capture — proxied request/response payload recorded when lab mode is on. */
+export type InterceptCapture = {
+  id: number;
+  ts: number;
+  slug: string;
+  method: string;
+  path: string;
+  reqHeaders: string;
+  reqBody: string;
+  respStatus: number;
+  respHeaders: string;
+  respBody: string;
+  host: string;
+};
+
+type InterceptRow = {
+  id: number;
+  ts: number;
+  slug: string;
+  method: string;
+  path: string;
+  req_headers: string;
+  req_body: string;
+  resp_status: number;
+  resp_headers: string;
+  resp_body: string;
+  host: string;
+};
+
 type TrafficRow = {
   id: number;
   ts: number;
@@ -46,6 +75,8 @@ export type Proxy = {
   hits: number;
   /** A purchased Cloudflare domain allocated to route this target, e.g. "api.example.com". */
   proxyDomain: string;
+  /** Whether intercept lab mode should capture payloads for this target. */
+  interceptEnabled: boolean;
   createdAt: number;
   updatedAt: number;
 };
@@ -58,12 +89,19 @@ type ProxyRow = {
   enabled: number;
   hits: number;
   proxy_domain: string;
+  intercept_enabled: number;
   created_at: number;
   updated_at: number;
 };
 
 /** Number of most-recent traffic entries the analyser keeps in the ring buffer. */
 const TRAFFIC_LIMIT = 200;
+
+/** Number of most-recent intercept captures to retain per slug. */
+const INTERCEPT_LIMIT = 500;
+
+/** Default TTL for intercept captures in seconds (10 min). */
+const INTERCEPT_DEFAULT_TTL = 600;
 
 type ItemRow = {
   id: number;
@@ -144,6 +182,29 @@ export class ItemsStore extends DurableObject {
     } catch {
       // Column already exists — nothing to do.
     }
+    // Migration: intercept_enabled flag on proxies.
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE proxies ADD COLUMN intercept_enabled INTEGER NOT NULL DEFAULT 0",
+      );
+    } catch {
+      // Column already exists.
+    }
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS intercept_captures (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts INTEGER NOT NULL,
+        slug TEXT NOT NULL,
+        method TEXT NOT NULL,
+        path TEXT NOT NULL,
+        req_headers TEXT NOT NULL DEFAULT '',
+        req_body TEXT NOT NULL DEFAULT '',
+        resp_status INTEGER NOT NULL DEFAULT 0,
+        resp_headers TEXT NOT NULL DEFAULT '',
+        resp_body TEXT NOT NULL DEFAULT '',
+        host TEXT NOT NULL DEFAULT ''
+      )
+    `);
     this.startedAt = Date.now();
   }
 
@@ -178,6 +239,56 @@ export class ItemsStore extends DurableObject {
     }
     await this.ctx.storage.put(STARTED_AT_KEY, this.startedAt);
     return this.startedAt;
+  }
+
+  /** Record an intercept capture — request + response payloads for a proxied target. */
+  private recordIntercept(entry: Omit<InterceptCapture, "id">): void {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO intercept_captures (ts, slug, method, path, req_headers, req_body, resp_status, resp_headers, resp_body, host) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      entry.ts,
+      entry.slug,
+      entry.method,
+      entry.path,
+      entry.reqHeaders,
+      entry.reqBody,
+      entry.respStatus,
+      entry.respHeaders,
+      entry.respBody,
+      entry.host,
+    );
+    this.ctx.storage.sql.exec(
+      "DELETE FROM intercept_captures WHERE id NOT IN (SELECT id FROM intercept_captures ORDER BY id DESC LIMIT ?)",
+      INTERCEPT_LIMIT,
+    );
+  }
+
+  /** Purge captures older than `ttlSeconds` across all slugs. */
+  private purgeExpiredIntercepts(ttlSeconds: number): void {
+    const cutoff = Date.now() - ttlSeconds * 1000;
+    this.ctx.storage.sql.exec("DELETE FROM intercept_captures WHERE ts < ?", cutoff);
+  }
+
+  private listIntercepts(): InterceptCapture[] {
+    return this.ctx.storage.sql
+      .exec<InterceptRow>("SELECT * FROM intercept_captures ORDER BY id DESC LIMIT ?", INTERCEPT_LIMIT)
+      .toArray()
+      .map((row) => ({
+        id: row.id,
+        ts: row.ts,
+        slug: row.slug,
+        method: row.method,
+        path: row.path,
+        reqHeaders: row.req_headers,
+        reqBody: row.req_body,
+        respStatus: row.resp_status,
+        respHeaders: row.resp_headers,
+        respBody: row.resp_body,
+        host: row.host,
+      }));
+  }
+
+  private clearIntercepts(): void {
+    this.ctx.storage.sql.exec("DELETE FROM intercept_captures");
   }
 
   /**
@@ -234,6 +345,7 @@ export class ItemsStore extends DurableObject {
       enabled: row.enabled === 1,
       hits: row.hits,
       proxyDomain: row.proxy_domain ?? "",
+      interceptEnabled: row.intercept_enabled === 1,
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -313,6 +425,16 @@ export class ItemsStore extends DurableObject {
       return new Response(null, { status: 204 });
     }
 
+    // Internal intercept capture write — fire-and-forget from the Worker proxy.
+    if (path === "/__intercept" && method === "POST") {
+      const entry = (await this.safeJson(request)) as Omit<
+        InterceptCapture,
+        "id"
+      > | null;
+      if (entry) this.recordIntercept(entry);
+      return new Response(null, { status: 204 });
+    }
+
     // Internal proxy resolution — used by the worker before rate limiting.
     if (path === "/__proxy" && method === "GET") {
       const slug = url.searchParams.get("slug") ?? "";
@@ -385,6 +507,20 @@ export class ItemsStore extends DurableObject {
       );
     }
 
+    if (path === "/api/intercepts" && method === "GET") {
+      const ttlSeconds = Number(request.headers.get("X-Intercept-TTL") ?? INTERCEPT_DEFAULT_TTL);
+      this.purgeExpiredIntercepts(ttlSeconds);
+      const captures = this.listIntercepts();
+      return withRl(
+        Response.json({ success: true, data: captures, count: captures.length }),
+      );
+    }
+
+    if (path === "/api/intercepts" && method === "DELETE") {
+      this.clearIntercepts();
+      return withRl(Response.json({ success: true, data: null }));
+    }
+
     if (path === "/api/traffic" && method === "GET") {
       const entries = this.listTraffic();
       const total = entries.length;
@@ -432,7 +568,7 @@ export class ItemsStore extends DurableObject {
       const slug = this.uniqueSlug(name || parsed.hostname);
       const now = Date.now();
       this.ctx.storage.sql.exec(
-        "INSERT INTO proxies (slug, name, target_url, enabled, hits, created_at, updated_at) VALUES (?, ?, ?, 1, 0, ?, ?)",
+        "INSERT INTO proxies (slug, name, target_url, enabled, hits, intercept_enabled, created_at, updated_at) VALUES (?, ?, ?, 1, 0, 0, ?, ?)",
         slug,
         label,
         parsed.toString().replace(/\/$/, ""),
@@ -482,15 +618,20 @@ export class ItemsStore extends DurableObject {
           body?.name !== undefined ? String(body.name).trim() : existing.name;
         const enabled =
           body?.enabled !== undefined ? (body.enabled ? 1 : 0) : existing.enabled ? 1 : 0;
+        const interceptEnabled =
+          body?.interceptEnabled !== undefined
+            ? (body.interceptEnabled ? 1 : 0)
+            : existing.interceptEnabled ? 1 : 0;
         const proxyDomain =
           body?.proxyDomain !== undefined
             ? String(body.proxyDomain).trim()
             : existing.proxyDomain;
         this.ctx.storage.sql.exec(
-          "UPDATE proxies SET name = ?, target_url = ?, enabled = ?, proxy_domain = ?, updated_at = ? WHERE id = ?",
+          "UPDATE proxies SET name = ?, target_url = ?, enabled = ?, intercept_enabled = ?, proxy_domain = ?, updated_at = ? WHERE id = ?",
           name || existing.name,
           targetUrl,
           enabled,
+          interceptEnabled,
           proxyDomain,
           Date.now(),
           id,
