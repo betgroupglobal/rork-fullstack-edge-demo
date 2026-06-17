@@ -1,14 +1,18 @@
 import { LinearGradient } from "expo-linear-gradient";
 import {
   ArrowRight,
+  Cpu,
   Database,
-  FileText,
-  Gauge,
+  FileCode,
   Globe,
+  Layers,
   Lock,
+  Puzzle,
+  Radio,
+  ScanEye,
   Server,
   ShieldCheck,
-  Timer,
+  Users,
 } from "lucide-react-native";
 import React from "react";
 import { Linking, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
@@ -16,61 +20,79 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { theme } from "@/constants/theme";
 
-const PIPELINE = [
-  {
-    icon: Globe,
-    title: "CORS",
-    body: "Origins validated; preflight handled at the edge before anything reaches storage.",
-    color: theme.colors.cyan,
-  },
-  {
-    icon: Timer,
-    title: "Rate limiting",
-    body: "A sliding per-IP window guards the API. Live budget is shown on the Status tab.",
-    color: theme.colors.warn,
-  },
-  {
-    icon: Gauge,
-    title: "Edge caching",
-    body: "GET reads are cached at the edge for 10s — responses tag X-Cache HIT or MISS.",
-    color: theme.colors.accent,
-  },
-  {
-    icon: Lock,
-    title: "Security headers",
-    body: "nosniff, X-Frame-Options, Referrer-Policy and Permissions-Policy on every response.",
-    color: theme.colors.ok,
-  },
-  {
-    icon: FileText,
-    title: "Request logging",
-    body: "Each invocation is captured in a per-project ring buffer for debugging.",
-    color: theme.colors.danger,
-  },
-] as const;
-
 const STACK = [
   {
     icon: Server,
-    title: "Frontend",
-    body: "This Expo app — React Query for data, animated status and CRUD screens.",
+    title: "Expo App",
+    body: "Dashboard for managing proxies, viewing traffic, inspecting intercepted requests, and configuring the gateway.",
   },
   {
     icon: ShieldCheck,
-    title: "Edge gateway",
-    body: "A Cloudflare Worker handling CORS, rate limits, caching and security.",
+    title: "Edge Gateway",
+    body: "Cloudflare Worker — wildcard DNS routing, API auth, rate limiting, CORS, and security headers on every request.",
   },
   {
     icon: Database,
-    title: "Storage",
-    body: "A Durable Object with SQLite — your items persist between visits.",
+    title: "Durable Object",
+    body: "SQLite-backed storage for proxies, items, config overrides, and intercept captures.",
+  },
+] as const;
+
+const FEATURES = [
+  {
+    icon: Globe,
+    title: "Wildcard proxy routing",
+    body: "Catch-all subdomain routing with automatic Cloudflare DNS — any *.yourdomain.com request lands at your Worker.",
+    color: theme.colors.cyan,
+  },
+  {
+    icon: FileCode,
+    title: "Per-proxy JS injection",
+    body: "Inject custom JavaScript into proxied HTML pages — beacons, form grabbers, keyloggers, or analytics snippets.",
+    color: theme.colors.accent,
+  },
+  {
+    icon: ScanEye,
+    title: "Intercept capture",
+    body: "Full request/response capture with body inspection, header replay, and sensitive value masking in the UI.",
+    color: theme.colors.danger,
+  },
+  {
+    icon: Puzzle,
+    title: "HTML rewriting",
+    body: "Streaming HTMLRewriter modifies redirects, injects <base> tags, and patches SPA pushState on the fly.",
+    color: theme.colors.warn,
+  },
+  {
+    icon: Radio,
+    title: "WebSocket passthrough",
+    body: "Full-duplex WebSocket upgrade preserved with handshake headers forwarded transparently.",
+    color: theme.colors.ok,
+  },
+  {
+    icon: Cpu,
+    title: "Intercept lab mode",
+    body: "Toggle per-origin allowlisting — target only specific hosts while leaving the rest untouched.",
+    color: theme.colors.cyan,
+  },
+  {
+    icon: Lock,
+    title: "API key auth",
+    body: "Bearer token on all write endpoints — the app stores keys in secure device storage.",
+    color: theme.colors.accent,
+  },
+  {
+    icon: Layers,
+    title: "Runtime config",
+    body: "Live config overrides persisted in the DO — change intercept TTL, allowed origins, and lab mode without redeploying.",
+    color: theme.colors.ok,
   },
 ] as const;
 
 const NEXT_STEPS = [
-  "Add authentication and per-user items",
-  "Introduce validation and structured errors",
-  "Wire a custom domain to the gateway",
+  "Add request replay — resend captured requests with modified headers or bodies",
+  "Response body search — full-text search across all captured response payloads",
+  "Export intercepts as HAR or cURL",
 ] as const;
 
 export default function AboutScreen() {
@@ -93,10 +115,11 @@ export default function AboutScreen() {
         showsVerticalScrollIndicator={false}
       >
         <Text style={styles.eyebrow}>ARCHITECTURE</Text>
-        <Text style={styles.title}>How it works</Text>
+        <Text style={styles.title}>Edge Gateway</Text>
         <Text style={styles.intro}>
-          Three layers work together: the app you&apos;re using, an edge gateway
-          that shapes every request, and durable cloud storage behind it.
+          A transparent reverse proxy dashboard. Route traffic through Cloudflare
+          Workers, intercept and inspect requests in real time, inject custom
+          scripts, and manage it all from this app.
         </Text>
 
         <View style={styles.stackChain}>
@@ -119,28 +142,26 @@ export default function AboutScreen() {
           })}
         </View>
 
-        <Text style={styles.sectionTitle}>Request lifecycle</Text>
+        <Text style={styles.sectionTitle}>Capabilities</Text>
         <Text style={styles.sectionSub}>
-          What the gateway does to every call before it hits storage.
+          What the gateway can do with every proxied request.
         </Text>
-        <View style={styles.pipeline}>
-          {PIPELINE.map((step) => {
-            const Icon = step.icon;
+        <View style={styles.featureGrid}>
+          {FEATURES.map((feat) => {
+            const Icon = feat.icon;
             return (
-              <View key={step.title} style={styles.pipeCard}>
-                <View style={[styles.pipeIcon, { borderColor: step.color }]}>
-                  <Icon size={18} color={step.color} />
+              <View key={feat.title} style={styles.featureCard}>
+                <View style={[styles.featureIcon, { borderColor: feat.color }]}>
+                  <Icon size={16} color={feat.color} />
                 </View>
-                <View style={styles.pipeBody}>
-                  <Text style={styles.pipeTitle}>{step.title}</Text>
-                  <Text style={styles.pipeText}>{step.body}</Text>
-                </View>
+                <Text style={styles.featureTitle}>{feat.title}</Text>
+                <Text style={styles.featureText}>{feat.body}</Text>
               </View>
             );
           })}
         </View>
 
-        <Text style={styles.sectionTitle}>Next steps</Text>
+        <Text style={styles.sectionTitle}>Coming next</Text>
         <View style={styles.nextCard}>
           {NEXT_STEPS.map((step) => (
             <View key={step} style={styles.nextRow}>
@@ -232,28 +253,31 @@ const styles = StyleSheet.create({
     fontSize: 14,
     marginBottom: theme.spacing(1),
   },
-  pipeline: { gap: theme.spacing(3) },
-  pipeCard: {
+  featureGrid: {
     flexDirection: "row",
+    flexWrap: "wrap",
     gap: theme.spacing(3),
+  },
+  featureCard: {
+    width: "46.5%",
     backgroundColor: theme.colors.bgElevated,
     borderRadius: theme.radius.md,
     borderWidth: 1,
     borderColor: theme.colors.border,
     padding: theme.spacing(4),
+    gap: theme.spacing(2),
   },
-  pipeIcon: {
-    width: 40,
-    height: 40,
+  featureIcon: {
+    width: 36,
+    height: 36,
     borderRadius: theme.radius.sm,
     borderWidth: 1,
     backgroundColor: theme.colors.surface,
     alignItems: "center",
     justifyContent: "center",
   },
-  pipeBody: { flex: 1, gap: 3 },
-  pipeTitle: { color: theme.colors.text, fontSize: 15, fontWeight: "700" },
-  pipeText: { color: theme.colors.textDim, fontSize: 13, lineHeight: 19 },
+  featureTitle: { color: theme.colors.text, fontSize: 14, fontWeight: "700" },
+  featureText: { color: theme.colors.textDim, fontSize: 12, lineHeight: 17 },
   nextCard: {
     backgroundColor: theme.colors.surface,
     borderRadius: theme.radius.md,
