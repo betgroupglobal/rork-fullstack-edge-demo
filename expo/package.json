@@ -8,6 +8,8 @@
     "start-web": "bunx rork start -p rtzd50w4j88t02pah4419 --web --tunnel",
     "start-web-dev": "DEBUG=expo* bunx rork start -p rtzd50w4j88t02pah4419 --web --tunnel",
     "build-web": "expo export --platform web",
+    "vercel-build": "expo export --platform web",
+    "build": "expo export --platform web",
     "lint": "expo lint"
   },
   "dependencies": {
