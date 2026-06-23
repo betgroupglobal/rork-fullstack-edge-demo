@@ -1,90 +1,24 @@
-# Cloudflare Worker configuration for Edge Gateway Dashboard
-# This configuration supports wildcard subdomain routing and dynamic origin mapping
-
 name = "edge-gateway-dashboard"
 main = "index.ts"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
+account_id = "110a21f0773ec7bff3fe7dac4b6ef550"
 
-# Account configuration - REQUIRED for Cloudflare API access
-# Replace with your actual Cloudflare account ID
-# account_id = "your-account-id"
-
-# Durable Objects configuration
 [[durable_objects.bindings]]
 name = "DO"
 class_name = "ItemsStore"
 
-# Durable Objects migrations
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["ItemsStore"]
 
-# Environment variables for wildcard routing
 [vars]
-# Base domain for wildcard routing
-BASE_DOMAIN = "joe.casino"
+# All values below can be left empty and configured entirely from the UI via
+# Settings > Worker Runtime Config. They are optional fallbacks only.
+BASE_DOMAIN = ""
+PROXY_TARGET = ""
+API_KEY = ""
+ALLOWED_ORIGINS = ""
 
-# Dynamic origin mapping for wildcard subdomains
-ORIGIN_MAP = '{"*.joe.casino":"https://backoffice.shufflegaming.com","backoffice.joe.casino":"https://backoffice.shufflegaming.com"}'
-
-# Default proxy target (fallback if no wildcard match)
-PROXY_TARGET = "https://backoffice.shufflegaming.com"
-
-# Cloudflare API credentials - REQUIRED for app-based management
-# SECURITY WARNING: Never commit real credentials to git!
-# Use 'wrangler secret put' or set via Cloudflare Dashboard
-# CF_API_TOKEN takes precedence over CF_API_KEY + CF_API_EMAIL
-# CF_API_KEY = "your-global-api-key"
-# CF_API_EMAIL = "your-email@example.com"
-# CF_API_TOKEN = "your-api-token"
-# CF_ACCOUNT_ID = "your-account-id"
-
-# Intercept lab mode (for payload inspection)
-# INTERCEPT_LAB_MODE = "false"
-# INTERCEPT_ALLOWLIST = "example.com,trusted-site.com"
-# INTERCEPT_TTL_SECONDS = "600"
-
-# API key for write operations
-# API_KEY = "your-secret-api-key"
-
-# CORS configuration
-# ALLOWED_ORIGINS = "*"
-
-# Routes configuration (uncomment and customize for your setup)
-# Wildcard route for all subdomains
-# routes = [
-#   { pattern = "https://*.example.com/*", zone_name = "example.com" },
-#   { pattern = "https://example.com/*", zone_name = "example.com" }
-# ]
-
-# KV namespace bindings (optional, for caching)
-# [[kv_namespaces]]
-# binding = "CACHE"
-# id = "your-kv-namespace-id"
-
-# D1 database bindings (optional, for additional storage)
-# [[d1_databases]]
-# binding = "DB"
-# database_name = "your-database-name"
-
-# R2 bucket bindings (optional, for object storage)
-# [[r2_buckets]]
-# binding = "BUCKET"
-# bucket_name = "your-bucket-name"
-
-# Build configuration
 [build]
 command = "npm install"
-
-# Deployment configuration
-[env.production]
-name = "edge-gateway-dashboard-prod"
-routes = [
-  { pattern = "https://*.example.com/*", zone_name = "example.com" },
-  { pattern = "https://example.com/*", zone_name = "example.com" }
-]
-
-[env.staging]
-name = "edge-gateway-dashboard-staging"
-# Add staging-specific routes here

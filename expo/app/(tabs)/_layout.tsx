@@ -1,5 +1,5 @@
 import { Tabs } from "expo-router";
-import { Activity, Bug, Cog, Database, Globe, Layers, Radio } from "lucide-react-native";
+import { Activity, Bug, Cog, Database, Globe, Layers, Radar, Radio, Route } from "lucide-react-native";
 import React from "react";
 import { Platform } from "react-native";
 
@@ -45,6 +45,20 @@ export default function TabLayout() {
         options={{
           title: "Proxies",
           tabBarIcon: ({ color, size }) => <Globe color={color} size={size} />,
+        }}
+      />
+      <Tabs.Screen
+        name="routes"
+        options={{
+          title: "Routes",
+          tabBarIcon: ({ color, size }) => <Route color={color} size={size} />,
+        }}
+      />
+      <Tabs.Screen
+        name="recon"
+        options={{
+          title: "Recon",
+          tabBarIcon: ({ color, size }) => <Radar color={color} size={size} />,
         }}
       />
       <Tabs.Screen

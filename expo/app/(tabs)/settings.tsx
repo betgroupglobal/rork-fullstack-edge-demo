@@ -4,6 +4,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  Globe,
   Key,
   RefreshCw,
   RotateCcw,
@@ -35,6 +36,7 @@ import {
   useUpdateWorkerConfig,
   useWorkerConfig,
 } from "@/hooks/useGateway";
+import { setBaseUrl } from "@/lib/api";
 
 /** Persisted app-level settings key in AsyncStorage. */
 const SETTINGS_KEY = "edge-gateway-settings-v2";
@@ -58,6 +60,17 @@ function defaultSettings(): AppSettings {
 /** Boolean-config fields shown as toggles. */
 const BOOLEAN_FIELDS = new Set(["INTERCEPT_LAB_MODE"]);
 
+/** Fields that should be masked by default (secrets / keys). */
+const SECRET_FIELDS = new Set(["API_KEY", "CF_API_KEY", "CF_API_TOKEN"]);
+
+/** Logical groupings for the worker runtime config editor. */
+const CONFIG_GROUPS: Array<{ title: string; icon: React.ElementType; keys: string[] }> = [
+  { title: "Security", icon: Shield, keys: ["API_KEY"] },
+  { title: "Edge Proxy", icon: Globe, keys: ["PROXY_TARGET", "BASE_DOMAIN", "ALLOWED_ORIGINS"] },
+  { title: "Intercept Lab", icon: Sliders, keys: ["INTERCEPT_LAB_MODE", "INTERCEPT_ALLOWLIST", "INTERCEPT_BLOCKLIST", "INTERCEPT_TTL_SECONDS"] },
+  { title: "Cloudflare", icon: Key, keys: ["CF_API_TOKEN", "CF_API_KEY", "CF_API_EMAIL"] },
+];
+
 /** Labels for config fields shown in the editor. */
 const FIELD_LABELS: Record<string, string> = {
   ALLOWED_ORIGINS: "Allowed Origins",
@@ -65,11 +78,53 @@ const FIELD_LABELS: Record<string, string> = {
   INTERCEPT_ALLOWLIST: "Intercept Allowlist",
   INTERCEPT_BLOCKLIST: "Intercept Blocklist",
   INTERCEPT_TTL_SECONDS: "Intercept TTL (seconds)",
+  API_KEY: "API Key",
+  CF_API_KEY: "Cloudflare API Key",
+  CF_API_EMAIL: "Cloudflare API Email",
+  CF_API_TOKEN: "Cloudflare API Token",
+  PROXY_TARGET: "Default Proxy Target",
+  BASE_DOMAIN: "Base Domain",
 };
 
-/** Reduced opacity for fields the user hasn't changed yet. */
+/** Hint text shown below each Worker Runtime Config field. */
+const FIELD_HINTS: Record<string, string> = {
+  ALLOWED_ORIGINS:
+    "Comma-separated origins allowed for CORS (e.g. https://app.example.com). Use * to allow all.",
+  INTERCEPT_LAB_MODE:
+    "Enable payload capture on proxied requests. Must also enable Intercept on individual proxy targets.",
+  INTERCEPT_ALLOWLIST:
+    "Only capture traffic to these upstream hostnames (comma-separated). Leave empty to capture all.",
+  INTERCEPT_BLOCKLIST:
+    "Never capture traffic to these upstream hostnames (comma-separated). Takes precedence over allowlist.",
+  INTERCEPT_TTL_SECONDS:
+    "How long (seconds) to retain captures before they are purged. Default: 600 (10 min).",
+  API_KEY:
+    "Bearer token required for write operations, intercept access, and config changes. Leave empty to disable auth.",
+  CF_API_KEY:
+    "Cloudflare Global API Key. Used together with CF_API_EMAIL. Not required if CF_API_TOKEN is set.",
+  CF_API_EMAIL:
+    "Cloudflare account email that owns the Global API Key.",
+  CF_API_TOKEN:
+    "Scoped Cloudflare API Token (recommended). If set, it takes precedence over the Global API Key.",
+  PROXY_TARGET:
+    "Default upstream URL for /proxy traffic when no proxy slug is provided (e.g. https://example.com).",
+  BASE_DOMAIN:
+    "Root domain used for auto-allocated subdomains (e.g. example.com).",
+};
+
+/** Default values pre-filled into every Worker Runtime Config field. */
 const FIELD_DEFAULT: Record<string, string> = {
+  ALLOWED_ORIGINS: "",
+  INTERCEPT_LAB_MODE: "false",
+  INTERCEPT_ALLOWLIST: "",
+  INTERCEPT_BLOCKLIST: "",
   INTERCEPT_TTL_SECONDS: "600",
+  API_KEY: "",
+  CF_API_KEY: "",
+  CF_API_EMAIL: "",
+  CF_API_TOKEN: "",
+  PROXY_TARGET: "",
+  BASE_DOMAIN: "",
 };
 
 function authHeader(apiKey: string): string | undefined {
@@ -90,11 +145,13 @@ export default function SettingsScreen() {
       try {
         const raw = await AsyncStorage.getItem(SETTINGS_KEY);
         const stored = raw !== null ? (JSON.parse(raw) as Partial<AppSettings>) : {};
-        apiKey = (await AsyncStorage.getItem("edge-api-key")) ?? "";
+        apiKey = (await AsyncStorage.getItem("edge-api-key")) || "";
+        const gatewayUrl = stored.gatewayUrl || "";
+        setBaseUrl(gatewayUrl);
         setSettings({
-          gatewayUrl: stored.gatewayUrl ?? "",
-          proxyHost: stored.proxyHost ?? "",
-          allowedOrigins: stored.allowedOrigins ?? "",
+          gatewayUrl,
+          proxyHost: stored.proxyHost || "",
+          allowedOrigins: stored.allowedOrigins || "",
           apiKey,
         });
       } catch {
@@ -125,6 +182,7 @@ export default function SettingsScreen() {
   );
 
   const saveAppSettings = useCallback(() => {
+    setBaseUrl(settings.gatewayUrl);
     persistSettings(settings);
     setSettingsDirty(false);
   }, [settings, persistSettings]);
@@ -138,13 +196,13 @@ export default function SettingsScreen() {
   const updateConfig = useUpdateWorkerConfig(ah);
   const clearConfig = useDeleteWorkerConfig(ah);
 
-  // Local edit buffer for worker config fields.
-  const [edit, setEdit] = useState<Record<string, string>>({});
+  // Local edit buffer for worker config fields — pre-seeded with defaults.
+  const [edit, setEdit] = useState<Record<string, string>>({ ...FIELD_DEFAULT });
   const [editDirty, setEditDirty] = useState(false);
 
   useEffect(() => {
-    if (config.data && !editDirty) {
-      setEdit({ ...config.data });
+    if (!editDirty) {
+      setEdit({ ...FIELD_DEFAULT, ...(config.data ?? {}) });
     }
   }, [config.data, editDirty]);
 
@@ -177,7 +235,7 @@ export default function SettingsScreen() {
         onPress: () => {
           clearConfig.mutate(undefined, {
             onSuccess: () => {
-              setEdit({});
+              setEdit({ ...FIELD_DEFAULT });
               setEditDirty(false);
             },
           });
@@ -194,7 +252,6 @@ export default function SettingsScreen() {
     );
   }
 
-  const configFields = Object.keys(FIELD_LABELS);
   const isSaving = updateConfig.isPending;
   const isClearing = clearConfig.isPending;
 
@@ -221,6 +278,16 @@ export default function SettingsScreen() {
           one place.
         </Text>
 
+        {settings.gatewayUrl.trim() === "" && (
+          <View style={styles.setupBanner}>
+            <Text style={styles.setupTitle}>Gateway URL required</Text>
+            <Text style={styles.setupText}>
+              Enter your worker URL below to connect this app to your gateway.
+              Everything else can be configured from the UI once connected.
+            </Text>
+          </View>
+        )}
+
         {/* ---- API Key ---- */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
@@ -236,7 +303,7 @@ export default function SettingsScreen() {
               style={styles.keyInput}
               value={settings.apiKey}
               onChangeText={(v) => updateSetting("apiKey", v)}
-              placeholder="sk_live_..."
+              placeholder="API key"
               placeholderTextColor={theme.colors.textFaint}
               secureTextEntry={!showKey}
               autoCapitalize="none"
@@ -271,20 +338,20 @@ export default function SettingsScreen() {
             label="Gateway URL"
             value={settings.gatewayUrl}
             onChange={(v) => updateSetting("gatewayUrl", v)}
-            placeholder="https://fullstack-edge-dashboard-backend.rork.app"
+            placeholder="https://your-worker.your-account.workers.dev"
           />
           <AppField
             label="Proxy Host"
             value={settings.proxyHost}
             onChange={(v) => updateSetting("proxyHost", v)}
-            placeholder="Same as gateway URL"
+            placeholder="https://example.com"
           />
           <AppField
             label="Allowed Origins"
             value={settings.allowedOrigins}
             onChange={(v) => updateSetting("allowedOrigins", v)}
-            placeholder="Comma-separated (empty = allow all)"
-          />
+            placeholder="*"
+          /> // placeholder kept as example; value is empty by default
 
           {settingsDirty && (
             <Pressable
@@ -308,7 +375,7 @@ export default function SettingsScreen() {
           </View>
           <Text style={styles.sectionDesc}>
             Overrides stored in the Durable Object. Takes precedence over
-            wrangler env vars.
+            wrangler env vars. Secret keys are masked by default.
           </Text>
 
           {config.isLoading ? (
@@ -325,61 +392,22 @@ export default function SettingsScreen() {
             </View>
           ) : (
             <>
-              <View style={styles.configCard}>
-                {configFields.map((key) => {
-                  const label = FIELD_LABELS[key] ?? key;
-                  const current = edit[key] ?? FIELD_DEFAULT[key] ?? "";
-                  const isBool = BOOLEAN_FIELDS.has(key);
-
-                  return (
-                    <View key={key} style={styles.configRow}>
-                      <View style={styles.configLabel}>
-                        <Text style={styles.configKey}>{label}</Text>
-                        <Text style={styles.configVar}>{key}</Text>
-                      </View>
-                      {isBool ? (
-                        <Switch
-                          value={current === "true"}
-                          onValueChange={() => toggleBool(key, current)}
-                          trackColor={{
-                            false: theme.colors.surfaceAlt,
-                            true: theme.colors.accentDim,
-                          }}
-                          thumbColor={
-                            current === "true"
-                              ? theme.colors.accent
-                              : theme.colors.textFaint
-                          }
-                        />
-                      ) : (
-                        <View style={styles.configValueRow}>
-                          <TextInput
-                            style={styles.configInput}
-                            value={current}
-                            onChangeText={(v) => updateField(key, v)}
-                            placeholder={FIELD_DEFAULT[key] ?? ""}
-                            placeholderTextColor={theme.colors.textFaint}
-                            autoCapitalize="none"
-                            autoCorrect={false}
-                          />
-                          {current !== "" && (
-                            <Pressable
-                              onPress={() => updateField(key, "")}
-                              style={styles.clearBtn}
-                              hitSlop={8}
-                            >
-                              <RotateCcw
-                                size={14}
-                                color={theme.colors.textFaint}
-                              />
-                            </Pressable>
-                          )}
-                        </View>
-                      )}
-                    </View>
-                  );
-                })}
-              </View>
+              {CONFIG_GROUPS.map((group) => (
+                <View key={group.title} style={styles.configGroup}>
+                  <View style={styles.configGroupHeader}>
+                    <group.icon size={14} color={theme.colors.accent} />
+                    <Text style={styles.configGroupTitle}>{group.title}</Text>
+                  </View>
+                  {group.keys.map((key) => (
+                    <ConfigField
+                      key={key}
+                      fieldKey={key}
+                      value={edit[key] ?? FIELD_DEFAULT[key] ?? ""}
+                      onChange={updateField}
+                    />
+                  ))}
+                </View>
+              ))}
 
               {config.data && Object.keys(config.data).length > 0 && (
                 <View style={styles.metaRow}>
@@ -494,6 +522,85 @@ function AppField({
   );
 }
 
+function ConfigField({
+  fieldKey,
+  value,
+  onChange,
+}: {
+  fieldKey: string;
+  value: string;
+  onChange: (key: string, value: string) => void;
+}) {
+  const [show, setShow] = useState(false);
+  const isBool = BOOLEAN_FIELDS.has(fieldKey);
+  const isSecret = SECRET_FIELDS.has(fieldKey);
+  const label = FIELD_LABELS[fieldKey] ?? fieldKey;
+  const current = value;
+  const isModified = current !== (FIELD_DEFAULT[fieldKey] ?? "");
+  const hint = FIELD_HINTS[fieldKey];
+
+  return (
+    <View style={styles.configRow}>
+      <View style={styles.configLabelRow}>
+        <View style={styles.configLabel}>
+          <Text style={styles.configKey}>{label}</Text>
+          <Text style={styles.configVar}>{fieldKey}</Text>
+        </View>
+        {isBool ? (
+          <Switch
+            value={current === "true"}
+            onValueChange={() => onChange(fieldKey, current === "true" ? "false" : "true")}
+            trackColor={{
+              false: theme.colors.surfaceAlt,
+              true: theme.colors.accentDim,
+            }}
+            thumbColor={current === "true" ? theme.colors.accent : theme.colors.textFaint}
+          />
+        ) : (
+          <View style={styles.configValueRow}>
+            <TextInput
+              style={[
+                styles.configInput,
+                isSecret && { width: 180, textAlign: "left" },
+              ]}
+              value={current}
+              onChangeText={(v) => onChange(fieldKey, v)}
+              placeholder={FIELD_DEFAULT[fieldKey] ?? ""}
+              placeholderTextColor={theme.colors.textFaint}
+              autoCapitalize="none"
+              autoCorrect={false}
+              secureTextEntry={isSecret && !show}
+              textContentType={isSecret ? "password" : "none"}
+            />
+            {isSecret ? (
+              <Pressable
+                onPress={() => setShow((p) => !p)}
+                style={styles.clearBtn}
+                hitSlop={8}
+              >
+                {show ? (
+                  <EyeOff size={14} color={theme.colors.textFaint} />
+                ) : (
+                  <Eye size={14} color={theme.colors.textFaint} />
+                )}
+              </Pressable>
+            ) : isModified ? (
+              <Pressable
+                onPress={() => onChange(fieldKey, FIELD_DEFAULT[fieldKey] ?? "")}
+                style={styles.clearBtn}
+                hitSlop={8}
+              >
+                <RotateCcw size={14} color={theme.colors.textFaint} />
+              </Pressable>
+            ) : null}
+          </View>
+        )}
+      </View>
+      {hint ? <Text style={styles.configHint}>{hint}</Text> : null}
+    </View>
+  );
+}
+
 function InfoRow({
   icon: Icon,
   label,
@@ -542,6 +649,24 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
     marginBottom: theme.spacing(1),
+  },
+  setupBanner: {
+    backgroundColor: "rgba(255,178,62,0.10)",
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: "rgba(255,178,62,0.35)",
+    padding: theme.spacing(4),
+    gap: theme.spacing(1),
+  },
+  setupTitle: {
+    color: theme.colors.warn,
+    fontSize: 14,
+    fontWeight: "800",
+  },
+  setupText: {
+    color: theme.colors.textDim,
+    fontSize: 13,
+    lineHeight: 19,
   },
   section: {
     marginTop: theme.spacing(1),
@@ -635,16 +760,51 @@ const styles = StyleSheet.create({
     borderColor: theme.colors.border,
     overflow: "hidden",
   },
-  configRow: {
+  configGroup: {
+    backgroundColor: theme.colors.surface,
+    borderRadius: theme.radius.md,
+    borderWidth: 1,
+    borderColor: theme.colors.border,
+    overflow: "hidden",
+    marginBottom: theme.spacing(2),
+  },
+  configGroupHeader: {
     flexDirection: "row",
     alignItems: "center",
-    justifyContent: "space-between",
+    gap: theme.spacing(2),
+    paddingHorizontal: theme.spacing(4),
+    paddingVertical: theme.spacing(3),
+    backgroundColor: theme.colors.bgElevated,
+    borderBottomWidth: 1,
+    borderBottomColor: theme.colors.border,
+  },
+  configGroupTitle: {
+    color: theme.colors.text,
+    fontSize: 13,
+    fontWeight: "700",
+    letterSpacing: 0.5,
+  },
+  configRow: {
+    flexDirection: "column",
     paddingHorizontal: theme.spacing(4),
     paddingVertical: theme.spacing(3),
     borderBottomWidth: 1,
     borderBottomColor: theme.colors.border,
   },
+  configLabelRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: theme.spacing(2),
+  },
   configLabel: { flex: 1, gap: 2, marginRight: theme.spacing(3) },
+  configHint: {
+    color: theme.colors.textFaint,
+    fontSize: 11,
+    lineHeight: 16,
+    fontFamily: theme.font.mono,
+    marginTop: theme.spacing(1.5),
+  },
   configKey: { color: theme.colors.text, fontSize: 14, fontWeight: "600" },
   configVar: {
     color: theme.colors.textFaint,

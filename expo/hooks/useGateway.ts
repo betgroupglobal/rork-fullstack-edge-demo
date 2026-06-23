@@ -14,6 +14,7 @@ import {
   deleteItem,
   deleteProxy,
   deleteWorkerConfig,
+  deleteWorkerRoute,
   fetchCloudflareZones,
   fetchHealth,
   fetchIntercepts,
@@ -21,16 +22,21 @@ import {
   fetchProxies,
   fetchTraffic,
   fetchWorkerConfig,
+  fetchWorkerRoutes,
+  generatePhishlet,
   updateItem,
   updateProxy,
   updateWorkerConfig,
   type HealthResult,
   type InterceptCapture,
+  type ReconInput,
+  type ReconResult,
   type Item,
   type ItemsResult,
   type Proxy,
   type TrafficResult,
   type WorkerConfig,
+  type WorkerRoutesResult,
   type ZonesResult,
 } from "@/lib/api";
 
@@ -40,27 +46,28 @@ export const queryKeys = {
   traffic: ["traffic"] as const,
   proxies: ["proxies"] as const,
   zones: ["cloudflare-zones"] as const,
+  routes: ["worker-routes"] as const,
   intercepts: ["intercepts"] as const,
   config: ["worker-config"] as const,
 };
 
-export function useCloudflareZones(): UseQueryResult<ZonesResult, Error> {
+export function useCloudflareZones(authHeader?: string): UseQueryResult<ZonesResult, Error> {
   return useQuery({
-    queryKey: queryKeys.zones,
-    queryFn: fetchCloudflareZones,
+    queryKey: [...queryKeys.zones, authHeader],
+    queryFn: () => fetchCloudflareZones(authHeader),
     staleTime: 60_000,
     retry: 1,
   });
 }
 
-export function useAllocateProxyDomain(): UseMutationResult<
+export function useAllocateProxyDomain(authHeader?: string): UseMutationResult<
   { hostname: string; target: string },
   Error,
   { proxyId: number; zoneId: string; hostname: string }
 > {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: allocateProxyDomain,
+    mutationFn: (input) => allocateProxyDomain(input, authHeader),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.proxies });
     },
@@ -185,9 +192,11 @@ export function useDeleteItem(authHeader?: string): UseMutationResult<void, Erro
 
 export function useIntercepts(authHeader?: string): UseQueryResult<InterceptCapture[], Error> {
   return useQuery({
-    queryKey: queryKeys.intercepts,
+    queryKey: [...queryKeys.intercepts, authHeader],
     queryFn: () => fetchIntercepts(authHeader),
-    refetchInterval: 5000,
+    refetchInterval: 3000,
+    refetchOnWindowFocus: true,
+    refetchIntervalInBackground: false,
     retry: 1,
   });
 }
@@ -235,6 +244,40 @@ export function useDeleteWorkerConfig(authHeader?: string): UseMutationResult<
     mutationFn: () => deleteWorkerConfig(authHeader),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.config });
+    },
+  });
+}
+
+export function useGeneratePhishlet(
+  authHeader?: string,
+): UseMutationResult<ReconResult, Error, { proxyId: number; input: ReconInput }> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ proxyId, input }) => generatePhishlet(proxyId, input, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.proxies });
+    },
+  });
+}
+
+export function useWorkerRoutes(authHeader?: string): UseQueryResult<WorkerRoutesResult, Error> {
+  return useQuery({
+    queryKey: [...queryKeys.routes, authHeader],
+    queryFn: () => fetchWorkerRoutes(authHeader),
+    refetchInterval: 8000,
+    staleTime: 30_000,
+    retry: 1,
+  });
+}
+
+export function useDeleteWorkerRoute(
+  authHeader?: string,
+): UseMutationResult<void, Error, { routeId: string; zoneId: string }> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ routeId, zoneId }) => deleteWorkerRoute(routeId, zoneId, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.routes });
     },
   });
 }
