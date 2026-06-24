@@ -12,7 +12,7 @@ import {
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import WebView from "react-native-webview";
+import WebView from "@/components/WebView";
 
 import PressableScale from "@/components/PressableScale";
 import PulseDot from "@/components/PulseDot";

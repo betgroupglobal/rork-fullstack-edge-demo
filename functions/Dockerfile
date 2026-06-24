@@ -1,20 +1,20 @@
-FROM node:20-alpine
+FROM node:22-slim
 
 WORKDIR /app
 
-# Copy dependency configs
-COPY package*.json ./
+# Copy dependency configs (paths are relative to the repo root build context)
+COPY functions/package*.json ./
 
 # Install packages
 RUN npm install
 
 # Copy source and config
-COPY wrangler.toml ./
-COPY index.ts ./
-COPY items-store.ts ./
+COPY functions/wrangler.toml ./
+COPY functions/index.ts ./
+COPY functions/items-store.ts ./
 
 # Expose wrangler dev port
 EXPOSE 8787
 
-# Run wrangler dev binding to all interfaces so Railway can proxy traffic
-CMD ["npx", "wrangler", "dev", "--ip", "0.0.0.0", "--port", "8787", "--local"]
+# Run wrangler dev binding to all interfaces on the Railway-injected PORT.
+CMD ["sh", "-c", "npx wrangler dev --ip 0.0.0.0 --port ${PORT:-8787} --local"]
