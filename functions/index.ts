@@ -1338,7 +1338,7 @@ export default {
 
     const isTraffic = path === "/api/traffic";
     const isIntercepts = path === "/api/intercepts";
-    const isProxyConfig = path === "/api/proxies" || /^\/api\/proxies\/\d+$/.test(path);
+    const isProxyConfig = path === "/api/proxies" || /^\/api\/proxies\/\d+$/.test(path) || /^\/api\/proxies\/\d+\/recon$/.test(path);
     const isWildcardDns = path === "/api/cloudflare/wildcard";
     const isWorkerRoutes = path === "/api/cloudflare/worker-routes" || /^\/api\/cloudflare\/worker-routes\/.+/.test(path);
     const isBeacon = path === "/api/beacon";
