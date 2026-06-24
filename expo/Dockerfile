@@ -2,6 +2,10 @@ FROM node:22-slim
 
 WORKDIR /app
 
+# Railway service variable passed into the build environment.
+ARG EXPO_PUBLIC_RORK_FUNCTIONS_URL
+ENV EXPO_PUBLIC_RORK_FUNCTIONS_URL=${EXPO_PUBLIC_RORK_FUNCTIONS_URL}
+
 COPY package*.json ./
 RUN npm install --legacy-peer-deps
 
