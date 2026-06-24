@@ -7,12 +7,21 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { theme } from "@/constants/theme";
+import { AuthProvider, useAuth } from "@/hooks/useAuth";
 
 SplashScreen.preventAutoHideAsync();
 
 const queryClient = new QueryClient();
 
 function RootLayoutNav() {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  useEffect(() => {
+    if (!isLoading) SplashScreen.hideAsync().catch(() => {});
+  }, [isLoading]);
+
+  if (isLoading) return null;
+
   return (
     <Stack
       screenOptions={{
@@ -21,24 +30,26 @@ function RootLayoutNav() {
         contentStyle: { backgroundColor: theme.colors.bg },
       }}
     >
-      <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+      {isAuthenticated ? (
+        <Stack.Screen name="(tabs)" options={{ headerShown: false }} />
+      ) : (
+        <Stack.Screen name="login" options={{ headerShown: false }} />
+      )}
     </Stack>
   );
 }
 
 export default function RootLayout() {
-  useEffect(() => {
-    SplashScreen.hideAsync().catch(() => {});
-  }, []);
-
   return (
     <QueryClientProvider client={queryClient}>
-      <SafeAreaProvider>
-        <GestureHandlerRootView style={{ flex: 1, backgroundColor: theme.colors.bg }}>
-          <StatusBar style="light" />
-          <RootLayoutNav />
-        </GestureHandlerRootView>
-      </SafeAreaProvider>
+      <AuthProvider>
+        <SafeAreaProvider>
+          <GestureHandlerRootView style={{ flex: 1, backgroundColor: theme.colors.bg }}>
+            <StatusBar style="light" />
+            <RootLayoutNav />
+          </GestureHandlerRootView>
+        </SafeAreaProvider>
+      </AuthProvider>
     </QueryClientProvider>
   );
 }

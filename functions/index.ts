@@ -2226,8 +2226,10 @@ export default {
     }
 
     const isConfigRoute = path === "/api/config";
+    const isAuthRoute = path.startsWith("/api/auth/");
     if (
       path !== "/health" &&
+      !isAuthRoute &&
       !path.startsWith("/api/items") &&
       !isTraffic &&
       !isIntercepts &&
@@ -2281,8 +2283,9 @@ export default {
     }
 
     // Intercept everything except reads of the analyser feed, proxy config
-    // management, and config routes, so the traffic view stays clean.
-    if (!isTraffic && !isProxyConfig && !isConfigRoute) {
+    // management, config routes, and auth (to avoid logging credential paths),
+    // so the traffic view stays clean.
+    if (!isTraffic && !isProxyConfig && !isConfigRoute && !isAuthRoute) {
       ctx.waitUntil(
         logTraffic(
           request,

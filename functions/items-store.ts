@@ -513,6 +513,24 @@ export class ItemsStore extends DurableObject {
         value TEXT NOT NULL DEFAULT ''
       )
     `);
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        email TEXT NOT NULL UNIQUE,
+        name TEXT NOT NULL DEFAULT '',
+        password_hash TEXT NOT NULL,
+        salt TEXT NOT NULL,
+        created_at INTEGER NOT NULL
+      )
+    `);
+    this.ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS sessions (
+        token TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      )
+    `);
     this.startedAt = Date.now();
   }
 
@@ -980,6 +998,23 @@ export class ItemsStore extends DurableObject {
       for (const [k, v] of Object.entries(rlHeaders)) response.headers.set(k, v);
       return response;
     };
+
+    if (path === "/api/auth/signup" && method === "POST") {
+      return withRl(await this.handleSignup(request));
+    }
+    if (path === "/api/auth/login" && method === "POST") {
+      return withRl(await this.handleLogin(request));
+    }
+    if (path === "/api/auth/logout" && method === "POST") {
+      return withRl(this.handleLogout(request));
+    }
+    if (path === "/api/auth/me" && method === "GET") {
+      const user = this.resolveSessionUser(request);
+      if (!user) {
+        return withRl(Response.json({ success: false, error: "unauthorized" }, { status: 401 }));
+      }
+      return withRl(Response.json({ success: true, data: { user } }));
+    }
 
     if (path === "/health") {
       const startedAt = await this.ensureStartedAt();
@@ -1465,6 +1500,160 @@ export class ItemsStore extends DurableObject {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
+  }
+
+  // ── Authentication (email + password) ──
+
+  /** Derive a PBKDF2 hash for a password using the given hex salt. Returns a hex digest. */
+  private async hashPassword(password: string, saltHex: string): Promise<string> {
+    const enc = new TextEncoder();
+    const salt = Uint8Array.from(saltHex.match(/.{2}/g)?.map((b) => parseInt(b, 16)) ?? []);
+    const key = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, [
+      "deriveBits",
+    ]);
+    const bits = await crypto.subtle.deriveBits(
+      { name: "PBKDF2", salt, iterations: 100_000, hash: "SHA-256" },
+      key,
+      256,
+    );
+    return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  /** Generate a random hex string of the given byte length. */
+  private randomHex(bytes: number): string {
+    const arr = new Uint8Array(bytes);
+    crypto.getRandomValues(arr);
+    return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
+  }
+
+  /** Constant-time string comparison to avoid timing attacks on the password hash. */
+  private safeEqual(a: string, b: string): boolean {
+    if (a.length !== b.length) return false;
+    let diff = 0;
+    for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+    return diff === 0;
+  }
+
+  private async handleSignup(request: Request): Promise<Response> {
+    const body = (await this.safeJson(request)) as {
+      email?: string;
+      password?: string;
+      name?: string;
+    } | null;
+    const email = (body?.email ?? "").toString().trim().toLowerCase();
+    const password = (body?.password ?? "").toString();
+    const name = (body?.name ?? "").toString().trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return Response.json({ success: false, error: "Enter a valid email address." }, { status: 400 });
+    }
+    if (password.length < 8) {
+      return Response.json(
+        { success: false, error: "Password must be at least 8 characters." },
+        { status: 400 },
+      );
+    }
+    const existing = safeSql(() =>
+      this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM users WHERE email = ?", email).one().n,
+    );
+    if (existing.ok && existing.value > 0) {
+      return Response.json({ success: false, error: "An account with that email already exists." }, { status: 409 });
+    }
+    const salt = this.randomHex(16);
+    const hash = await this.hashPassword(password, salt);
+    const now = Date.now();
+    const inserted = safeSql(() => {
+      this.ctx.storage.sql.exec(
+        "INSERT INTO users (email, name, password_hash, salt, created_at) VALUES (?, ?, ?, ?, ?)",
+        email,
+        name,
+        hash,
+        salt,
+        now,
+      );
+      return this.ctx.storage.sql
+        .exec<{ id: number }>("SELECT id FROM users WHERE id = last_insert_rowid()")
+        .one().id;
+    });
+    if (!inserted.ok) {
+      return Response.json({ success: false, error: "Could not create the account." }, { status: 500 });
+    }
+    return this.issueSession(inserted.value, email, name);
+  }
+
+  private async handleLogin(request: Request): Promise<Response> {
+    const body = (await this.safeJson(request)) as { email?: string; password?: string } | null;
+    const email = (body?.email ?? "").toString().trim().toLowerCase();
+    const password = (body?.password ?? "").toString();
+    const row = safeSql(() =>
+      this.ctx.storage.sql
+        .exec<{ id: number; name: string; password_hash: string; salt: string }>(
+          "SELECT id, name, password_hash, salt FROM users WHERE email = ?",
+          email,
+        )
+        .toArray()[0],
+    );
+    if (!row.ok || !row.value) {
+      return Response.json({ success: false, error: "Invalid email or password." }, { status: 401 });
+    }
+    const hash = await this.hashPassword(password, row.value.salt);
+    if (!this.safeEqual(hash, row.value.password_hash)) {
+      return Response.json({ success: false, error: "Invalid email or password." }, { status: 401 });
+    }
+    return this.issueSession(row.value.id, email, row.value.name);
+  }
+
+  /** Create a session token for a user and return the auth payload. */
+  private issueSession(userId: number, email: string, name: string): Response {
+    const token = this.randomHex(32);
+    const now = Date.now();
+    const expiresAt = now + 30 * 24 * 60 * 60 * 1000; // 30 days
+    const created = safeSql(() => {
+      this.ctx.storage.sql.exec("DELETE FROM sessions WHERE expires_at < ?", now);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
+        token,
+        userId,
+        now,
+        expiresAt,
+      );
+    });
+    if (!created.ok) {
+      return Response.json({ success: false, error: "Could not start a session." }, { status: 500 });
+    }
+    return Response.json({
+      success: true,
+      data: { token, user: { id: userId, email, name } },
+    });
+  }
+
+  /** Resolve the authenticated user from a Bearer session token, or null. */
+  private resolveSessionUser(
+    request: Request,
+  ): { id: number; email: string; name: string } | null {
+    const auth = request.headers.get("Authorization") ?? "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    if (!token) return null;
+    const row = safeSql(() =>
+      this.ctx.storage.sql
+        .exec<{ user_id: number; expires_at: number; email: string; name: string }>(
+          "SELECT s.user_id, s.expires_at, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?",
+          token,
+        )
+        .toArray()[0],
+    );
+    if (!row.ok || !row.value) return null;
+    if (row.value.expires_at < Date.now()) {
+      safeSql(() => this.ctx.storage.sql.exec("DELETE FROM sessions WHERE token = ?", token));
+      return null;
+    }
+    return { id: row.value.user_id, email: row.value.email, name: row.value.name };
+  }
+
+  private handleLogout(request: Request): Response {
+    const auth = request.headers.get("Authorization") ?? "";
+    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
+    if (token) safeSql(() => this.ctx.storage.sql.exec("DELETE FROM sessions WHERE token = ?", token));
+    return Response.json({ success: true, data: null });
   }
 
   private async safeJson(request: Request): Promise<unknown> {

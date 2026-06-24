@@ -96,6 +96,58 @@ async function parse<T>(response: Response): Promise<T> {
   return json as T;
 }
 
+// ── Authentication (email + password) ──
+
+export type AuthUser = { id: number; email: string; name: string };
+export type AuthSession = { token: string; user: AuthUser };
+
+/** Register a new account and return a session token + user. */
+export async function signup(input: {
+  email: string;
+  password: string;
+  name?: string;
+}): Promise<AuthSession> {
+  const response = await safeFetch(`${BASE_URL}/api/auth/signup`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = await parse<{ data: AuthSession }>(response);
+  return data.data;
+}
+
+/** Sign in with email + password and return a session token + user. */
+export async function login(input: {
+  email: string;
+  password: string;
+}): Promise<AuthSession> {
+  const response = await safeFetch(`${BASE_URL}/api/auth/login`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  const data = await parse<{ data: AuthSession }>(response);
+  return data.data;
+}
+
+/** Invalidate the current session token on the server. Best-effort. */
+export async function logout(token: string): Promise<void> {
+  await safeFetch(`${BASE_URL}/api/auth/logout`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+  }).catch(() => undefined);
+}
+
+/** Resolve the current user from a stored session token. Throws if invalid/expired. */
+export async function fetchMe(token: string): Promise<AuthUser> {
+  const response = await safeFetch(`${BASE_URL}/api/auth/me`, {
+    cache: "no-store",
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const data = await parse<{ data: { user: AuthUser } }>(response);
+  return data.data.user;
+}
+
 export async function fetchHealth(): Promise<HealthResult> {
   const start = Date.now();
   const response = await safeFetch(`${BASE_URL}/health`, { cache: "no-store" });
