@@ -193,20 +193,18 @@ export async function fetchCloudflareZones(authHeader?: string): Promise<ZonesRe
     headers,
   });
   const text = await response.text();
-  const json = (text ? JSON.parse(text) : {}) as {
-    success?: boolean;
-    configured?: boolean;
-    data?: CloudflareZone[];
-    error?: string;
-  };
-  if (!json.success) {
+  let zonesJson: { success?: boolean; configured?: boolean; data?: CloudflareZone[]; error?: string } = {};
+  if (text) {
+    try { zonesJson = JSON.parse(text); } catch { zonesJson = { success: false, error: "Invalid JSON response from gateway" }; }
+  }
+  if (!zonesJson.success) {
     return {
-      configured: json.configured ?? false,
+      configured: zonesJson.configured ?? false,
       zones: [],
-      error: json.error,
+      error: zonesJson.error,
     };
   }
-  return { configured: true, zones: json.data ?? [] };
+  return { configured: true, zones: zonesJson.data ?? [] };
 }
 
 /**
@@ -343,16 +341,14 @@ export async function fetchWorkerRoutes(authHeader?: string): Promise<WorkerRout
     headers,
   });
   const text = await response.text();
-  const json = (text ? JSON.parse(text) : {}) as {
-    success?: boolean;
-    configured?: boolean;
-    data?: WorkerRoute[];
-    error?: string;
-  };
-  if (!json.success) {
-    return { configured: json.configured ?? false, routes: [], error: json.error };
+  let routesJson: { success?: boolean; configured?: boolean; data?: WorkerRoute[]; error?: string } = {};
+  if (text) {
+    try { routesJson = JSON.parse(text); } catch { routesJson = { success: false, error: "Invalid JSON response from gateway" }; }
   }
-  return { configured: true, routes: json.data ?? [] };
+  if (!routesJson.success) {
+    return { configured: routesJson.configured ?? false, routes: [], error: routesJson.error };
+  }
+  return { configured: true, routes: routesJson.data ?? [] };
 }
 
 export async function deleteWorkerRoute(
@@ -587,8 +583,9 @@ export async function fetchHarExport(authHeader?: string): Promise<{ harJson: st
   });
   const text = await response.text();
   if (!response.ok) {
-    const json = text ? JSON.parse(text) : {};
-    throw new Error((json as { error?: string }).error ?? `HAR export failed (${response.status})`);
+    let harErr: { error?: string } = {};
+    if (text) { try { harErr = JSON.parse(text); } catch { /* ignore */ } }
+    throw new Error(harErr.error ?? `HAR export failed (${response.status})`);
   }
   const disposition = response.headers.get("Content-Disposition") ?? "";
   const fileNameMatch = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);

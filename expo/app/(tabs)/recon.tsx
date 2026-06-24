@@ -14,6 +14,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import WebView from "react-native-webview";
 
+import PulseDot from "@/components/PulseDot";
 import { theme } from "@/constants/theme";
 import { useApiKey } from "@/hooks/useApiKey";
 import { useGeneratePhishlet, useIteratePhishlet, useProxies } from "@/hooks/useGateway";
@@ -168,13 +169,18 @@ export default function ReconScreen() {
   }, [selected]);
 
   // ── WebView message handler ──
-  const onMessage = useCallback((event: { nativeEvent: { data?: string } }) => {
+  const onMessage = useCallback((event: { nativeEvent: { data?: string | Record<string, unknown> } }) => {
     try {
-      const data = event.nativeEvent.data ? JSON.parse(event.nativeEvent.data) : {};
+      // React Native WebView may auto-parse JSON strings into objects before
+      // delivering to onMessage, so we handle both raw strings and objects.
+      const raw = event.nativeEvent.data;
+      if (raw == null) return;
+      const data: Record<string, unknown> =
+        typeof raw === "string" ? JSON.parse(raw) as Record<string, unknown> : raw;
       setCaptured((prev) => {
         const merged: Record<string, unknown> = { ...prev };
         for (const key of ["urls", "cookies", "formFields", "redirects", "domains"]) {
-          const arr: unknown[] = data[key] ?? [];
+          const arr: unknown[] = Array.isArray(data[key]) ? data[key] as unknown[] : [];
           const existing = (merged[key] as unknown[]) ?? [];
           const seen = new Set(existing.map((v) => typeof v === "string" ? v : JSON.stringify(v)));
           for (const item of arr) {
@@ -424,7 +430,7 @@ export default function ReconScreen() {
                 <View style={styles.intelHeader}>
                   <Fingerprint size={14} color={stage === "scanning" ? theme.colors.cyan : theme.colors.accent} />
                   <Text style={styles.intelTitle}>Captured intelligence</Text>
-                  {stage === "scanning" && <PulseDot size={8} color={theme.colors.cyan} />}
+                  {stage === "scanning" && <PulseDot active size={8} color={theme.colors.cyan} />}
                 </View>
                 {captured.pageTitle ? (
                   <View style={styles.intelRow}>
@@ -512,12 +518,6 @@ export default function ReconScreen() {
 
 // ── Mini sub-components ──
 
-function PulseDot({ size, color }: { size: number; color: string }) {
-  return (
-    <View style={[styles.pulseDot, { width: size, height: size, borderRadius: size / 2, backgroundColor: color, opacity: 0.9 }]} />
-  );
-}
-
 function MiniMetric({ label, value }: { label: string; value: number }) {
   return (
     <View style={styles.miniMetric}>
@@ -582,7 +582,6 @@ const styles = StyleSheet.create({
   miniMetric: { flex: 1, backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(2.5), alignItems: "center" },
   miniMetricValue: { color: theme.colors.text, fontSize: 16, fontWeight: "800", fontFamily: theme.font.mono },
   miniMetricLabel: { color: theme.colors.textFaint, fontSize: 9, fontWeight: "700", letterSpacing: 0.5, fontFamily: theme.font.mono, marginTop: 2 },
-  pulseDot: {},
 
   // Result cards
   resultCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(4), gap: theme.spacing(3) },

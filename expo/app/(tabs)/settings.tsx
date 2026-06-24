@@ -65,6 +65,7 @@ const CONFIG_GROUPS: Array<{ title: string; icon: React.ElementType; keys: strin
   { title: "Edge Proxy", icon: Globe, keys: ["PROXY_TARGET", "BASE_DOMAIN", "ALLOWED_ORIGINS"] },
   { title: "Intercept Lab", icon: Sliders, keys: ["INTERCEPT_LAB_MODE", "INTERCEPT_ALLOWLIST", "INTERCEPT_BLOCKLIST", "INTERCEPT_TTL_SECONDS"] },
   { title: "Cloudflare", icon: Key, keys: ["CF_API_TOKEN", "CF_API_KEY", "CF_API_EMAIL"] },
+  { title: "Residential Proxy", icon: Globe, keys: ["RESIDENTIAL_PROXY_POOL"] },
 ];
 
 const FIELD_LABELS: Record<string, string> = {

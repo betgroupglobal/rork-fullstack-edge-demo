@@ -1353,7 +1353,9 @@ export class ItemsStore extends DurableObject {
             { status: 404 },
           );
         }
-        this.ctx.storage.sql.exec("DELETE FROM items WHERE id = ?", id);
+        safeSql(() => {
+          this.ctx.storage.sql.exec("DELETE FROM items WHERE id = ?", id);
+        });
         this.listCache = null;
         return withRl(Response.json({ success: true, data: existing }));
       }
