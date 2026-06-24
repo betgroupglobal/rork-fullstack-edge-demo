@@ -14,6 +14,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import WebView from "react-native-webview";
 
+import PressableScale from "@/components/PressableScale";
 import PulseDot from "@/components/PulseDot";
 import { theme } from "@/constants/theme";
 import { useApiKey } from "@/hooks/useApiKey";
@@ -340,12 +341,12 @@ export default function ReconScreen() {
                 </View>
               </View>
               {selected && (
-                <Pressable
+                <PressableScale
+                  haptic="heavy"
                   onPress={runScan}
                   disabled={stage !== "idle" && stage !== "done"}
-                  style={({ pressed }) => [
+                  style={[
                     styles.scanBtn,
-                    pressed && styles.pressed,
                     stage !== "idle" && stage !== "done" && styles.scanBtnBusy,
                   ]}
                 >
@@ -360,7 +361,7 @@ export default function ReconScreen() {
                       <Text style={styles.scanBtnText}>{stageLabel[stage]}</Text>
                     </>
                   )}
-                </Pressable>
+                </PressableScale>
               )}
             </View>
 

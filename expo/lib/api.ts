@@ -72,7 +72,22 @@ async function parse<T>(response: Response): Promise<T> {
   } catch {
     throw new Error("Network error — the gateway is unreachable. Check your connection and gateway URL.");
   }
-  const json = text ? JSON.parse(text) : {};
+  let json: unknown = {};
+  if (text) {
+    try {
+      json = JSON.parse(text);
+    } catch {
+      // The gateway returned something that isn't JSON (e.g. an HTML error page,
+      // a 502 from the hosting platform, or a misconfigured redirect). Surface a
+      // sanitised snippet so the user can diagnose without leaking full payloads.
+      const snippet = text.slice(0, 200).replace(/\n/g, " ").trim();
+      throw new Error(
+        `Gateway returned non-JSON response (${response.status}). ` +
+        `Verify the gateway URL is correct and the service is healthy. ` +
+        `Response starts with: "${snippet}${text.length > 200 ? "…" : ""}"`,
+      );
+    }
+  }
   if (!response.ok) {
     const message =
       (json as { error?: string }).error ?? `Request failed (${response.status})`;

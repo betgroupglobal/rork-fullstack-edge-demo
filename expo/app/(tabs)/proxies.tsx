@@ -29,6 +29,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import PressableScale from "@/components/PressableScale";
 import PulseDot from "@/components/PulseDot";
 import { theme } from "@/constants/theme";
 import { useApiKey } from "@/hooks/useApiKey";
@@ -308,10 +309,10 @@ export default function ProxiesScreen() {
               placeholderTextColor={theme.colors.textFaint} style={styles.input} autoCapitalize="none"
             />
             {formError ? <Text style={styles.formError}>{formError}</Text> : null}
-            <Pressable onPress={submit} disabled={createProxy.isPending} style={({ pressed }) => [styles.deployBtn, pressed && styles.pressed, createProxy.isPending && styles.deployBtnBusy]}>
+            <PressableScale haptic="heavy" onPress={submit} disabled={createProxy.isPending} style={[styles.deployBtn, createProxy.isPending && styles.deployBtnBusy]}>
               {createProxy.isPending ? <Loader size={16} color={theme.colors.bg} /> : <Globe size={16} color={theme.colors.bg} />}
               <Text style={styles.deployText}>{createProxy.isPending ? "Deploying…" : "Deploy proxy"}</Text>
-            </Pressable>
+            </PressableScale>
           </View>
 
           {/* Proxy list */}

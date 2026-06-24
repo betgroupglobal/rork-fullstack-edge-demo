@@ -22,10 +22,20 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import AnimatedCounter from "@/components/AnimatedCounter";
+import FadeIn from "@/components/FadeIn";
+import PressableScale from "@/components/PressableScale";
 import PulseDot from "@/components/PulseDot";
 import { theme } from "@/constants/theme";
 import { useHealth, useTraffic } from "@/hooks/useGateway";
 import type { TrafficEntry } from "@/lib/api";
+
+/** Extracts a leading integer from a stat string, or null if non-numeric. */
+function numericPart(raw: string): { value: number | null; suffix: string } {
+  const match = raw.match(/^(\d+)(.*)$/);
+  if (!match) return { value: null, suffix: "" };
+  return { value: parseInt(match[1], 10), suffix: match[2] };
+}
 
 // ── Helpers ──
 
@@ -142,9 +152,9 @@ export default function DashboardScreen() {
                 <Text style={styles.healthSub}>gateway · /health</Text>
               </View>
             </View>
-            <Pressable onPress={() => { health.refetch(); traffic.refetch(); }} style={({ pressed }) => [styles.refreshBtn, pressed && styles.refreshBtnPressed]} hitSlop={10}>
+            <PressableScale haptic="medium" onPress={() => { health.refetch(); traffic.refetch(); }} style={styles.refreshBtn} hitSlop={10}>
               {(health.isFetching || traffic.isFetching) ? <ActivityIndicator size="small" color={theme.colors.accent} /> : <RefreshCw size={15} color={theme.colors.accent} />}
-            </Pressable>
+            </PressableScale>
           </View>
           {health.isError ? (
             <Text style={styles.errorText}>{health.error?.message ?? "Could not reach the gateway."}</Text>
@@ -158,14 +168,17 @@ export default function DashboardScreen() {
 
         {/* Gateway stats */}
         <View style={styles.statGrid}>
-          {gateStats.map((stat) => {
+          {gateStats.map((stat, i) => {
             const Icon = stat.icon;
+            const { value, suffix } = numericPart(stat.value);
             return (
-              <View key={stat.label} style={styles.statCard}>
-                <Icon size={16} color={stat.accent} />
-                <Text style={styles.statValue}>{stat.value}</Text>
-                <Text style={styles.statLabel}>{stat.label}</Text>
-              </View>
+              <FadeIn key={stat.label} delay={i * 70} style={styles.statCardWrap}>
+                <View style={styles.statCard}>
+                  <Icon size={16} color={stat.accent} />
+                  <AnimatedCounter value={value} display={stat.value} suffix={suffix} style={styles.statValue} />
+                  <Text style={styles.statLabel}>{stat.label}</Text>
+                </View>
+              </FadeIn>
             );
           })}
         </View>
@@ -178,14 +191,17 @@ export default function DashboardScreen() {
         </View>
 
         <View style={styles.statGrid}>
-          {trafficStats.map((stat) => {
+          {trafficStats.map((stat, i) => {
             const Icon = stat.icon;
+            const { value, suffix } = numericPart(stat.value);
             return (
-              <View key={stat.label} style={styles.statCard}>
-                <Icon size={16} color={stat.accent} />
-                <Text style={styles.statValue}>{stat.value}</Text>
-                <Text style={styles.statLabel}>{stat.label}</Text>
-              </View>
+              <FadeIn key={stat.label} delay={i * 70} style={styles.statCardWrap}>
+                <View style={styles.statCard}>
+                  <Icon size={16} color={stat.accent} />
+                  <AnimatedCounter value={value} display={stat.value} suffix={suffix} style={styles.statValue} />
+                  <Text style={styles.statLabel}>{stat.label}</Text>
+                </View>
+              </FadeIn>
             );
           })}
         </View>
@@ -212,8 +228,10 @@ export default function DashboardScreen() {
           </View>
         ) : (
           <View style={styles.trafficFeed}>
-            {trafficEntries.slice(0, 15).map((entry) => (
-              <TrafficRow key={entry.id} entry={entry} />
+            {trafficEntries.slice(0, 15).map((entry, i) => (
+              <FadeIn key={entry.id} delay={Math.min(i, 8) * 45} offset={8}>
+                <TrafficRow entry={entry} />
+              </FadeIn>
             ))}
           </View>
         )}
@@ -240,7 +258,8 @@ const styles = StyleSheet.create({
   healthyRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2) },
   healthyText: { color: theme.colors.textDim, fontSize: 12, flexShrink: 1 },
   statGrid: { flexDirection: "row", flexWrap: "wrap", gap: theme.spacing(2) },
-  statCard: { flexGrow: 1, flexBasis: "46%", backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3.5), gap: theme.spacing(1.5) },
+  statCardWrap: { flexGrow: 1, flexBasis: "46%" },
+  statCard: { backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3.5), gap: theme.spacing(1.5) },
   statValue: { color: theme.colors.text, fontSize: 20, fontWeight: "800", fontFamily: theme.font.mono },
   statLabel: { color: theme.colors.textFaint, fontSize: 11, letterSpacing: 0.5 },
   sectionHeader: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2) },
