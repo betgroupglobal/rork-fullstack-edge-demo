@@ -287,9 +287,12 @@ export type ReconInput = {
   captured: {
     urls?: string[];
     cookies?: string[];
-    formFields?: { name: string; type: string }[];
+    formFields?: { name: string; type: string; id?: string; placeholder?: string }[];
     redirects?: string[];
     domains?: string[];
+    pageTitle?: string;
+    formAction?: string;
+    formMethod?: string;
   };
 };
 
@@ -567,4 +570,70 @@ export const CREDENTIAL_FIELDS: ReadonlySet<string> = new Set(_CREDENTIAL_FIELDS
 export function maskValue(value: string): string {
   if (!value || value.length <= 6) return "***";
   return `${value.slice(0, 2)}${'*'.repeat(Math.min(value.length - 4, 12))}${value.slice(-2)}`;
+}
+
+// ── HAR (HTTP Archive) export ──
+
+/**
+ * Generates a HAR 1.2 JSON file from all stored intercept captures.
+ * Compatible with Chrome DevTools, Charles Proxy, and most traffic analysis tools.
+ */
+export async function fetchHarExport(authHeader?: string): Promise<{ harJson: string; fileName: string }> {
+  const headers: Record<string, string> = {};
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE_URL}/api/intercepts/har`, {
+    cache: "no-store",
+    headers,
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    const json = text ? JSON.parse(text) : {};
+    throw new Error((json as { error?: string }).error ?? `HAR export failed (${response.status})`);
+  }
+  const disposition = response.headers.get("Content-Disposition") ?? "";
+  const fileNameMatch = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
+  const fileName = fileNameMatch?.[1]?.replace(/['"]/g, "") ?? `edge-gateway-${new Date().toISOString().slice(0, 10)}.har`;
+  return { harJson: text, fileName };
+}
+
+// ── Replay engine ──
+
+export type ReplayEntry = {
+  index: number;
+  method: string;
+  url: string;
+  status: number;
+  latencyMs: number;
+  redirectUrl: string | null;
+  cookies: string[];
+  credentials: Record<string, string>;
+  error?: string;
+};
+
+export type ReplayReport = {
+  total: number;
+  succeeded: number;
+  failed: number;
+  entries: ReplayEntry[];
+  extractedTokens: string[];
+  flowSummary: string;
+};
+
+/**
+ * Replays a HAR session through a configured proxy target.
+ * Sequentially executes each request, tracks cookies, and extracts credentials.
+ */
+export async function replayHar(
+  input: { har: string; proxySlug: string },
+  authHeader?: string,
+): Promise<ReplayReport> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE_URL}/api/replay`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(input),
+  });
+  const data = await parse<{ data: ReplayReport }>(response);
+  return data.data;
 }

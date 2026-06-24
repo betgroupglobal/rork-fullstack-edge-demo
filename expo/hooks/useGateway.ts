@@ -16,6 +16,7 @@ import {
   deleteWorkerConfig,
   deleteWorkerRoute,
   fetchCloudflareZones,
+  fetchHarExport,
   fetchHealth,
   fetchIntercepts,
   fetchItems,
@@ -24,6 +25,7 @@ import {
   fetchWorkerConfig,
   fetchWorkerRoutes,
   generatePhishlet,
+  replayHar,
   updateItem,
   updateProxy,
   updateWorkerConfig,
@@ -34,6 +36,7 @@ import {
   type Item,
   type ItemsResult,
   type Proxy,
+  type ReplayReport,
   type TrafficResult,
   type WorkerConfig,
   type WorkerRoutesResult,
@@ -288,6 +291,31 @@ export function useDeleteWorkerRoute(
     mutationFn: ({ routeId, zoneId }) => deleteWorkerRoute(routeId, zoneId, authHeader),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.routes });
+    },
+  });
+}
+
+// ── HAR export ──
+
+/** Fetches a HAR 1.2 JSON blob from stored intercept captures. Returns raw JSON string + filename. */
+export function useHarExport(
+  authHeader?: string,
+): UseMutationResult<{ harJson: string; fileName: string }, Error, void> {
+  return useMutation({
+    mutationFn: () => fetchHarExport(authHeader),
+  });
+}
+
+// ── Replay engine ──
+
+export function useReplayHar(
+  authHeader?: string,
+): UseMutationResult<ReplayReport, Error, { har: string; proxySlug: string }> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input) => replayHar(input, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.intercepts });
     },
   });
 }

