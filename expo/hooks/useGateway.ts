@@ -40,6 +40,7 @@ import {
   type ZonesResult,
 } from "@/lib/api";
 
+// ── Shared query keys & intervals ──
 export const queryKeys = {
   health: ["health"] as const,
   items: ["items"] as const,
@@ -50,6 +51,15 @@ export const queryKeys = {
   intercepts: ["intercepts"] as const,
   config: ["worker-config"] as const,
 };
+
+/** Centralised refetch intervals (ms) so changes propagate across all screens. */
+export const REFETCH_INTERVALS = {
+  health: 5_000,
+  traffic: 4_000,
+  proxies: 6_000,
+  intercepts: 3_000,
+  routes: 8_000,
+} as const;
 
 export function useCloudflareZones(authHeader?: string): UseQueryResult<ZonesResult, Error> {
   return useQuery({
@@ -78,7 +88,7 @@ export function useProxies(): UseQueryResult<Proxy[], Error> {
   return useQuery({
     queryKey: queryKeys.proxies,
     queryFn: fetchProxies,
-    refetchInterval: 6000,
+    refetchInterval: REFETCH_INTERVALS.proxies,
     retry: 1,
   });
 }
@@ -127,7 +137,7 @@ export function useTraffic(): UseQueryResult<TrafficResult, Error> {
   return useQuery({
     queryKey: queryKeys.traffic,
     queryFn: fetchTraffic,
-    refetchInterval: 4000,
+    refetchInterval: REFETCH_INTERVALS.traffic,
     refetchOnWindowFocus: true,
     retry: 1,
   });
@@ -137,7 +147,7 @@ export function useHealth(): UseQueryResult<HealthResult, Error> {
   return useQuery({
     queryKey: queryKeys.health,
     queryFn: fetchHealth,
-    refetchInterval: 5000,
+    refetchInterval: REFETCH_INTERVALS.health,
     refetchOnWindowFocus: true,
     retry: 1,
   });
@@ -194,7 +204,7 @@ export function useIntercepts(authHeader?: string): UseQueryResult<InterceptCapt
   return useQuery({
     queryKey: [...queryKeys.intercepts, authHeader],
     queryFn: () => fetchIntercepts(authHeader),
-    refetchInterval: 3000,
+    refetchInterval: REFETCH_INTERVALS.intercepts,
     refetchOnWindowFocus: true,
     refetchIntervalInBackground: false,
     retry: 1,
@@ -264,7 +274,7 @@ export function useWorkerRoutes(authHeader?: string): UseQueryResult<WorkerRoute
   return useQuery({
     queryKey: [...queryKeys.routes, authHeader],
     queryFn: () => fetchWorkerRoutes(authHeader),
-    refetchInterval: 8000,
+    refetchInterval: REFETCH_INTERVALS.routes,
     staleTime: 30_000,
     retry: 1,
   });

@@ -7,7 +7,7 @@ import {
   Timer,
   Zap,
 } from "lucide-react-native";
-import React, { useMemo } from "react";
+import React, { memo, useMemo } from "react";
 import {
   ActivityIndicator,
   Pressable,
@@ -55,7 +55,7 @@ function ago(ts: number): string {
   return `${Math.floor(m / 60)}h`;
 }
 
-function TrafficRow({ entry }: { entry: TrafficEntry }) {
+const TrafficRow = memo(function TrafficRow({ entry }: { entry: TrafficEntry }) {
   return (
     <View style={styles.row}>
       <View style={[styles.method, { borderColor: methodColor(entry.method) }]}>
@@ -102,7 +102,7 @@ function TrafficRow({ entry }: { entry: TrafficEntry }) {
       <Text style={styles.age}>{ago(entry.ts)}</Text>
     </View>
   );
-}
+});
 
 export default function TrafficScreen() {
   const insets = useSafeAreaInsets();

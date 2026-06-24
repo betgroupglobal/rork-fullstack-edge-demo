@@ -1,5 +1,5 @@
 import { Pencil, Trash2 } from "lucide-react-native";
-import React, { useEffect, useRef } from "react";
+import React, { memo, useEffect, useRef } from "react";
 import { Animated, Pressable, StyleSheet, Text, View } from "react-native";
 
 import { theme } from "@/constants/theme";
@@ -23,7 +23,7 @@ function formatDate(ts: number): string {
 }
 
 /** A single saved item with entrance animation plus edit / delete actions. */
-export default function ItemRow({
+export default memo(function ItemRow({
   item,
   index,
   onEdit,
@@ -84,7 +84,7 @@ export default function ItemRow({
       </View>
     </Animated.View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   row: {

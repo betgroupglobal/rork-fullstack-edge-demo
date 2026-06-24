@@ -481,8 +481,8 @@ export async function deleteWorkerConfig(authHeader?: string): Promise<WorkerCon
   return data.data;
 }
 
-/** Sensitive-field patterns for masking in the UI. */
-export const SENSITIVE_FIELDS = [
+/** Sensitive-field patterns for masking in the UI — stored as a Set for O(1) lookup. */
+const _SENSITIVE_FIELDS_ARR = [
   // Passwords
   "password", "passwd", "pass", "pwd", "passcode", "passphrase",
   "new_password", "old_password", "current_password", "confirm_password",
@@ -520,7 +520,7 @@ export const SENSITIVE_FIELDS = [
 ];
 
 /** Credential/identity field patterns shown prominently in the intercept UI. */
-export const CREDENTIAL_FIELDS = [
+const _CREDENTIAL_FIELDS_ARR = [
   // === IDENTITY — shown first ===
   // Username variants
   "username", "user_name", "user", "uname", "login_name", "loginname",
@@ -556,6 +556,12 @@ export const CREDENTIAL_FIELDS = [
   // === CRYPTO ===
   "wallet", "wallet_address", "address", "mnemonic",
 ];
+
+/** Sensitive-field patterns for masking in the UI — Set for O(1) lookup. */
+export const SENSITIVE_FIELDS: ReadonlySet<string> = new Set(_SENSITIVE_FIELDS_ARR);
+
+/** Credential/identity field patterns shown prominently in the intercept UI — Set for O(1) lookup. */
+export const CREDENTIAL_FIELDS: ReadonlySet<string> = new Set(_CREDENTIAL_FIELDS_ARR);
 
 /** Mask a value by showing first 2 and last 2 characters. */
 export function maskValue(value: string): string {

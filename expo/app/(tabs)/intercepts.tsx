@@ -1,7 +1,7 @@
 import * as Clipboard from "expo-clipboard";
 import { LinearGradient } from "expo-linear-gradient";
 import { Check, ChevronDown, ChevronRight, Copy, RefreshCw, ShieldAlert, Trash2 } from "lucide-react-native";
-import React, { useCallback, useMemo, useState } from "react";
+import React, { memo, useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -53,16 +53,20 @@ function extractUrl(raw: string): string | null {
   } catch { return null; }
 }
 
+/** Determine whether a field name is a credential, sensitive, or normal value — uses Set for O(1) lookups. */
 function fieldType(key: string): "credential" | "sensitive" | "normal" {
   const lower = key.toLowerCase();
-  const isCred = CREDENTIAL_FIELDS.some((f) => lower === f || lower.includes(f));
-  const isSens = SENSITIVE_FIELDS.some((f) => lower.includes(f));
-  if (isCred && isSens) return "sensitive";
-  if (isCred) return "credential";
+  if (CREDENTIAL_FIELDS.has(lower)) return "credential";
+  if (SENSITIVE_FIELDS.has(lower)) return "sensitive";
+  // Fallback: scan for partial matches (e.g. "new_password" matches "password")
+  for (const f of CREDENTIAL_FIELDS) {
+    if (lower.includes(f)) return SENSITIVE_FIELDS.has(f) ? "sensitive" : "credential";
+  }
   return "normal";
 }
 
-function CopyBtn({ value }: { value: string }) {
+/** Copy-to-clipboard button with animated check feedback. */
+const CopyBtn = memo(function CopyBtn({ value }: { value: string }) {
   const [done, setDone] = useState(false);
   const copy = useCallback(async () => {
     await Clipboard.setStringAsync(value);
@@ -74,10 +78,10 @@ function CopyBtn({ value }: { value: string }) {
       {done ? <Check size={11} color={theme.colors.ok} /> : <Copy size={11} color={theme.colors.textFaint} />}
     </Pressable>
   );
-}
+});
 
 // ── Simple credential table row ──
-function CredRow({ label, value, type }: { label: string; value: string; type: "sensitive" | "credential" | "normal" }) {
+const CredRow = memo(function CredRow({ label, value, type }: { label: string; value: string; type: "sensitive" | "credential" | "normal" }) {
   return (
     <View style={[styles.tblRow, type === "sensitive" && styles.tblRowSens, type === "credential" && styles.tblRowCred]}>
       <View style={styles.tblKeyCell}>
@@ -96,10 +100,10 @@ function CredRow({ label, value, type }: { label: string; value: string; type: "
       </View>
     </View>
   );
-}
+});
 
 // ── One row in the capture list inside a target group ──
-function CaptureRow({ capture, expanded, onToggle }: { capture: InterceptCapture; expanded: boolean; onToggle: () => void }) {
+const CaptureRow = memo(function CaptureRow({ capture, expanded, onToggle }: { capture: InterceptCapture; expanded: boolean; onToggle: () => void }) {
   const ts = new Date(capture.ts).toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
   const fields = parseBody(capture.reqBody) ?? [];
   const captureUrl = extractUrl(capture.reqBody);
@@ -153,7 +157,7 @@ function CaptureRow({ capture, expanded, onToggle }: { capture: InterceptCapture
       )}
     </View>
   );
-}
+});
 
 // ── All captures grouped under one target slug ──
 function TargetGroup({ slug, captures }: { slug: string; captures: InterceptCapture[] }) {

@@ -375,8 +375,19 @@ function isInterceptableContentType(ct: string): boolean {
   return INTERCEPTABLE_CONTENT_TYPES.some((prefix) => lower.startsWith(prefix));
 }
 
-/** Fetch the runtime config stored in the DO (used when env vars are absent). */
+/**
+ * Fetch the runtime config stored in the DO (used when env vars are absent).
+ * In-memory cache across a single request to avoid duplicate DO lookups when
+ * multiple functions (CORS, auth, intercept, etc.) all need runtime config.
+ */
+let _runtimeConfigCache: { config: Record<string, string>; ts: number } | null = null;
+const RUNTIME_CONFIG_CACHE_TTL = 2000; // 2-second cache across requests.
+
 async function resolveRuntimeConfig(env: Env): Promise<Record<string, string>> {
+  const now = Date.now();
+  if (_runtimeConfigCache && now - _runtimeConfigCache.ts < RUNTIME_CONFIG_CACHE_TTL) {
+    return _runtimeConfigCache.config;
+  }
   try {
     const req = new Request("https://do/api/config");
     req.headers.set("X-Rork-DO-Class", "ItemsStore");
@@ -384,7 +395,9 @@ async function resolveRuntimeConfig(env: Env): Promise<Record<string, string>> {
     const res = await doFetch(env, req);
     if (!res.ok) return {};
     const json = (await res.json()) as { data?: Record<string, string> };
-    return json.data ?? {};
+    const config = json.data ?? {};
+    _runtimeConfigCache = { config, ts: now };
+    return config;
   } catch {
     return {};
   }
@@ -1188,21 +1201,24 @@ async function reverseProxy(
       headers: respHeaders,
     });
 
+    // HTML rewriting: use preResolvedConfig when available to avoid a redundant DO lookup.
     const contentType = (response.headers.get("Content-Type") ?? "").toLowerCase();
     const isHtml = contentType.includes("text/html") || contentType.includes("application/xhtml");
-    if (isHtml && proxyLabel) {
-      const config = preResolvedConfig ?? await resolveProxy(env, proxyLabel);
-      if (config?.proxyDomain) {
-        try {
-          finalResponse = rewriteProxiedContent(
-            finalResponse,
-            config.proxyDomain,
-            target.host,
-            config.injectJsEnabled && config.injectJs ? config.injectJs : undefined,
-          );
-        } catch {
-          // HTMLRewriter failed — return the unrewritten response.
-        }
+    const htmlRewriteConfig = preResolvedConfig?.proxyDomain
+      ? preResolvedConfig
+      : proxyLabel
+        ? await resolveProxy(env, proxyLabel)
+        : null;
+    if (isHtml && htmlRewriteConfig?.proxyDomain) {
+      try {
+        finalResponse = rewriteProxiedContent(
+          finalResponse,
+          htmlRewriteConfig.proxyDomain,
+          target.host,
+          htmlRewriteConfig.injectJsEnabled && htmlRewriteConfig.injectJs ? htmlRewriteConfig.injectJs : undefined,
+        );
+      } catch {
+        // HTMLRewriter failed — return the unrewritten response.
       }
     }
 
