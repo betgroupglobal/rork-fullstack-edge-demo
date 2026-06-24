@@ -43,6 +43,8 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import FadeIn from "@/components/FadeIn";
+import PressableScale from "@/components/PressableScale";
 import { theme } from "@/constants/theme";
 import {
   useDeleteWorkerConfig,
@@ -281,10 +283,10 @@ export default function SettingsScreen() {
           <AppField label="Proxy Host" value={settings.proxyHost} onChange={(v) => updateApp("proxyHost", v)} placeholder="https://example.com" />
           <AppField label="Allowed Origins" value={settings.allowedOrigins} onChange={(v) => updateApp("allowedOrigins", v)} placeholder="*" />
           {dirty && (
-            <Pressable onPress={saveApp} style={({ pressed }) => [styles.saveBtn, pressed && styles.saveBtnPressed]}>
+            <PressableScale onPress={saveApp} haptic="medium" style={styles.saveBtn}>
               <Save size={15} color={theme.colors.bg} />
               <Text style={styles.saveBtnText}>Save app settings</Text>
-            </Pressable>
+            </PressableScale>
           )}
         </View>
 
@@ -323,10 +325,10 @@ export default function SettingsScreen() {
                 </View>
               )}
               {editDirty && (
-                <Pressable onPress={saveConfig} disabled={updateConfig.isPending} style={({ pressed }) => [styles.saveBtn, pressed && styles.saveBtnPressed]}>
+                <PressableScale onPress={saveConfig} disabled={updateConfig.isPending} haptic="medium" style={styles.saveBtn}>
                   {updateConfig.isPending ? <ActivityIndicator size="small" color={theme.colors.bg} /> : <Save size={15} color={theme.colors.bg} />}
                   <Text style={styles.saveBtnText}>{updateConfig.isPending ? "Saving..." : "Save worker config"}</Text>
-                </Pressable>
+                </PressableScale>
               )}
             </>
           )}
@@ -349,7 +351,7 @@ export default function SettingsScreen() {
         </View>
 
         {/* ── Architecture (from About) ── */}
-        <View style={styles.section}>
+        <FadeIn delay={60} style={styles.section}>
           <View style={styles.sectionHead}>
             <Layers size={15} color={theme.colors.accent} />
             <Text style={styles.sectionTitle}>Architecture</Text>
@@ -372,33 +374,33 @@ export default function SettingsScreen() {
               );
             })}
           </View>
-        </View>
+        </FadeIn>
 
         {/* ── Capabilities ── */}
-        <View style={styles.section}>
+        <FadeIn delay={120} style={styles.section}>
           <View style={styles.sectionHead}>
             <Puzzle size={15} color={theme.colors.accent} />
             <Text style={styles.sectionTitle}>Capabilities</Text>
           </View>
           <View style={styles.capGrid}>
-            {CAPABILITIES.map((cap) => {
+            {CAPABILITIES.map((cap, i) => {
               const Icon = cap.icon;
               return (
-                <View key={cap.title} style={styles.capCard}>
+                <FadeIn key={cap.title} delay={140 + i * 50} offset={8} style={styles.capCard}>
                   <Icon size={15} color={theme.colors.accent} />
                   <Text style={styles.capTitle}>{cap.title}</Text>
                   <Text style={styles.capText}>{cap.body}</Text>
-                </View>
+                </FadeIn>
               );
             })}
           </View>
-        </View>
+        </FadeIn>
 
         {/* ── Docs link ── */}
-        <Pressable onPress={() => Linking.openURL("https://developers.cloudflare.com/workers/")} style={({ pressed }) => [styles.docBtn, pressed && styles.docBtnPressed]}>
+        <PressableScale onPress={() => Linking.openURL("https://developers.cloudflare.com/workers/")} haptic="light" style={styles.docBtn}>
           <Text style={styles.docBtnText}>Cloudflare Workers docs</Text>
           <ArrowRight size={15} color={theme.colors.bg} />
-        </Pressable>
+        </PressableScale>
 
         <Text style={styles.footer}>Edge Gateway Dashboard · built with Rork</Text>
       </ScrollView>

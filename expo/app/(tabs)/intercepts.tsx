@@ -17,6 +17,8 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import FadeIn from "@/components/FadeIn";
+import PressableScale from "@/components/PressableScale";
 import { theme } from "@/constants/theme";
 import { useDeleteIntercepts, useHarExport, useIntercepts, useReplayHar } from "@/hooks/useGateway";
 import { useApiKey } from "@/hooks/useApiKey";
@@ -326,18 +328,18 @@ export default function InterceptsScreen() {
         <View style={styles.quickActions}>
           {captures.length > 0 && (
             <>
-              <Pressable onPress={exportHar} disabled={harExport.isPending} style={({ pressed }) => [styles.quickBtn, styles.harBtn, pressed && styles.pressed]}>
+              <PressableScale onPress={exportHar} disabled={harExport.isPending} haptic="medium" style={[styles.quickBtn, styles.harBtn]}>
                 {harExport.isPending ? <ActivityIndicator size="small" color={theme.colors.accent} /> : <Download size={14} color={theme.colors.accent} />}
                 <Text style={styles.quickText}>Export HAR</Text>
-              </Pressable>
-              <Pressable onPress={() => { setShowReplay(true); setReplayResult(null); }} style={({ pressed }) => [styles.quickBtn, styles.playBtn, pressed && styles.pressed]}>
+              </PressableScale>
+              <PressableScale onPress={() => { setShowReplay(true); setReplayResult(null); }} haptic="medium" style={[styles.quickBtn, styles.playBtn]}>
                 <Play size={14} color={theme.colors.cyan} />
                 <Text style={[styles.quickText, { color: theme.colors.cyan }]}>Replay</Text>
-              </Pressable>
-              <Pressable onPress={wipe} disabled={deleteAll.isPending} style={({ pressed }) => [styles.quickBtn, styles.clearBtn, pressed && styles.pressed]}>
+              </PressableScale>
+              <PressableScale onPress={wipe} disabled={deleteAll.isPending} haptic="heavy" style={[styles.quickBtn, styles.clearBtn]}>
                 <Trash2 size={14} color={theme.colors.danger} />
                 <Text style={[styles.quickText, { color: theme.colors.danger }]}>Clear</Text>
-              </Pressable>
+              </PressableScale>
             </>
           )}
         </View>
@@ -362,8 +364,10 @@ export default function InterceptsScreen() {
           </View>
         ) : (
           <View style={styles.list}>
-            {grouped.map(([slug, caps]) => (
-              <TargetGroup key={slug} slug={slug} captures={caps} />
+            {grouped.map(([slug, caps], i) => (
+              <FadeIn key={slug} delay={i * 70}>
+                <TargetGroup slug={slug} captures={caps} />
+              </FadeIn>
             ))}
           </View>
         )}
@@ -390,10 +394,10 @@ export default function InterceptsScreen() {
               <Text style={styles.modalLabel}>HAR JSON</Text>
               <TextInput style={[styles.modalInput, styles.modalInputLarge]} value={harPaste} onChangeText={setHarPaste} placeholder='Paste HAR JSON here ({"log":...})' placeholderTextColor={theme.colors.textFaint} multiline textAlignVertical="top" autoCapitalize="none" autoCorrect={false} />
             </View>
-            <Pressable onPress={runReplay} disabled={replay.isPending} style={({ pressed }) => [styles.modalRunBtn, pressed && styles.pressed, replay.isPending && { opacity: 0.5 }]}>
+            <PressableScale onPress={runReplay} disabled={replay.isPending} haptic="medium" style={[styles.modalRunBtn, replay.isPending && { opacity: 0.5 }]}>
               {replay.isPending ? <ActivityIndicator color={theme.colors.bg} size="small" /> : <Play size={16} color={theme.colors.bg} />}
               <Text style={styles.modalRunText}>{replay.isPending ? "Replaying…" : "Run Replay"}</Text>
-            </Pressable>
+            </PressableScale>
             {replayResult && (
               <View style={styles.replayResult}>
                 <View style={styles.replayResultHead}>
