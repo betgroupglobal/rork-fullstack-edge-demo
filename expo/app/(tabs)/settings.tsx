@@ -1,6 +1,8 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Clipboard from "expo-clipboard";
 import { LinearGradient } from "expo-linear-gradient";
 import {
+  Check,
   Copy,
   Eye,
   EyeOff,
@@ -462,13 +464,18 @@ export default function SettingsScreen() {
           )}
         </View>
 
-        {/* ---- Worker Info ---- */}
+        {/* ---- Worker URLs & APIs ---- */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Wrench size={16} color={theme.colors.accent} />
-            <Text style={styles.sectionTitle}>Worker Endpoints</Text>
+            <Text style={styles.sectionTitle}>Worker URLs & APIs</Text>
           </View>
           <View style={styles.infoCard}>
+            <InfoRow
+              icon={Copy}
+              label="Gateway URL"
+              value={settings.gatewayUrl || "Not configured"}
+            />
             <InfoRow
               icon={Copy}
               label="Health"
@@ -478,6 +485,26 @@ export default function SettingsScreen() {
               icon={Copy}
               label="Config API"
               value={`${settings.gatewayUrl}/api/config`}
+            />
+            <InfoRow
+              icon={Copy}
+              label="Proxies API"
+              value={`${settings.gatewayUrl}/api/proxies`}
+            />
+            <InfoRow
+              icon={Copy}
+              label="Intercepts API"
+              value={`${settings.gatewayUrl}/api/intercepts`}
+            />
+            <InfoRow
+              icon={Copy}
+              label="Worker Routes API"
+              value={`${settings.gatewayUrl}/api/cloudflare/worker-routes`}
+            />
+            <InfoRow
+              icon={Copy}
+              label="Beacon API"
+              value={`${settings.gatewayUrl}/api/beacon`}
             />
             <InfoRow
               icon={Copy}
@@ -610,14 +637,26 @@ function InfoRow({
   label: string;
   value: string;
 }) {
+  const [copied, setCopied] = useState(false);
+  const copy = useCallback(() => {
+    Clipboard.setString(value);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1400);
+  }, [value]);
+
   return (
-    <View style={styles.infoRow}>
+    <Pressable onPress={copy} style={({ pressed }) => [styles.infoRow, pressed && styles.pressed]}>
       <Icon size={14} color={theme.colors.textDim} />
       <View style={styles.infoBody}>
         <Text style={styles.infoLabel}>{label}</Text>
         <Text style={styles.infoValue}>{value}</Text>
       </View>
-    </View>
+      {copied ? (
+        <Check size={14} color={theme.colors.ok} />
+      ) : (
+        <Copy size={14} color={theme.colors.textFaint} />
+      )}
+    </Pressable>
   );
 }
 
@@ -875,6 +914,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     gap: theme.spacing(2),
   },
+  pressed: { opacity: 0.6 },
   infoBody: { flex: 1, gap: 2 },
   infoLabel: {
     color: theme.colors.textDim,
