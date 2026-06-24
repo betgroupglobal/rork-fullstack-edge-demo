@@ -69,6 +69,7 @@ const CONFIG_FIELDS = [
   "CF_API_TOKEN",
   "PROXY_TARGET",
   "BASE_DOMAIN",
+  "RESIDENTIAL_PROXY_POOL",
 ] as const;
 
 type ConfigFields = (typeof CONFIG_FIELDS)[number];

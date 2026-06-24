@@ -619,6 +619,46 @@ export type ReplayReport = {
   flowSummary: string;
 };
 
+// ── Multi-pass phishlet iteration ──
+
+export type CritiqueEntry = {
+  pass: number;
+  finding: string;
+  severity: "critical" | "warning" | "info";
+  fix: string;
+};
+
+export type IterateResult = {
+  proxyId: number;
+  phishlet: string;
+  passes: number;
+  critiques: CritiqueEntry[];
+  improvements: string[];
+  score: number;
+};
+
+/**
+ * Runs multi-pass self-critique on a generated phishlet YAML.
+ * The Worker fetches the target through residential proxies, submits synthetic
+ * credentials, follows redirects, detects missing fields, CSRF tokens, and
+ * auth cookies, then iteratively fixes the YAML across multiple passes.
+ */
+export async function iteratePhishlet(
+  proxyId: number,
+  input: { phishlet: string; captured: ReconInput["captured"] },
+  authHeader?: string,
+): Promise<IterateResult> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE_URL}/api/proxies/${proxyId}/recon/iterate`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(input),
+  });
+  const data = await parse<{ data: IterateResult }>(response);
+  return data.data;
+}
+
 /**
  * Replays a HAR session through a configured proxy target.
  * Sequentially executes each request, tracks cookies, and extracts credentials.

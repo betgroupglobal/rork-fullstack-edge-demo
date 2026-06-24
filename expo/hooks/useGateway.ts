@@ -25,6 +25,7 @@ import {
   fetchWorkerConfig,
   fetchWorkerRoutes,
   generatePhishlet,
+  iteratePhishlet,
   replayHar,
   updateItem,
   updateProxy,
@@ -33,6 +34,7 @@ import {
   type InterceptCapture,
   type ReconInput,
   type ReconResult,
+  type IterateResult,
   type Item,
   type ItemsResult,
   type Proxy,
@@ -303,6 +305,16 @@ export function useHarExport(
 ): UseMutationResult<{ harJson: string; fileName: string }, Error, void> {
   return useMutation({
     mutationFn: () => fetchHarExport(authHeader),
+  });
+}
+
+// ── Multi-pass phishlet iteration ──
+
+export function useIteratePhishlet(
+  authHeader?: string,
+): UseMutationResult<IterateResult, Error, { proxyId: number; phishlet: string; captured: NonNullable<ReconInput["captured"]> }> {
+  return useMutation({
+    mutationFn: ({ proxyId, phishlet, captured }) => iteratePhishlet(proxyId, { phishlet, captured }, authHeader),
   });
 }
 

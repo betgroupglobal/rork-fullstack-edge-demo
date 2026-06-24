@@ -1,5 +1,5 @@
 import { Tabs } from "expo-router";
-import { Activity, Bug, Cog, Database, Globe, Layers, Radar, Radio, Route } from "lucide-react-native";
+import { Bug, Cog, Globe, LayoutDashboard, Radar } from "lucide-react-native";
 import React from "react";
 import { Platform } from "react-native";
 
@@ -20,24 +20,17 @@ export default function TabLayout() {
           paddingTop: 6,
         },
         tabBarLabelStyle: {
-          fontSize: 11,
-          fontWeight: "600",
-          letterSpacing: 0.3,
+          fontSize: 10,
+          fontWeight: "700",
+          letterSpacing: 0.5,
         },
       }}
     >
       <Tabs.Screen
         name="index"
         options={{
-          title: "Status",
-          tabBarIcon: ({ color, size }) => <Activity color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
-        name="items"
-        options={{
-          title: "Items",
-          tabBarIcon: ({ color, size }) => <Database color={color} size={size} />,
+          title: "Dashboard",
+          tabBarIcon: ({ color, size }) => <LayoutDashboard color={color} size={size} />,
         }}
       />
       <Tabs.Screen
@@ -48,24 +41,10 @@ export default function TabLayout() {
         }}
       />
       <Tabs.Screen
-        name="routes"
-        options={{
-          title: "Routes",
-          tabBarIcon: ({ color, size }) => <Route color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
         name="recon"
         options={{
           title: "Recon",
           tabBarIcon: ({ color, size }) => <Radar color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
-        name="traffic"
-        options={{
-          title: "Traffic",
-          tabBarIcon: ({ color, size }) => <Radio color={color} size={size} />,
         }}
       />
       <Tabs.Screen
@@ -80,13 +59,6 @@ export default function TabLayout() {
         options={{
           title: "Settings",
           tabBarIcon: ({ color, size }) => <Cog color={color} size={size} />,
-        }}
-      />
-      <Tabs.Screen
-        name="about"
-        options={{
-          title: "About",
-          tabBarIcon: ({ color, size }) => <Layers color={color} size={size} />,
         }}
       />
     </Tabs>

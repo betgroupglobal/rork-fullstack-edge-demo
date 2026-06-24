@@ -22,12 +22,13 @@ import { useDeleteIntercepts, useHarExport, useIntercepts, useReplayHar } from "
 import { useApiKey } from "@/hooks/useApiKey";
 import { CREDENTIAL_FIELDS, SENSITIVE_FIELDS, type InterceptCapture, type ReplayReport } from "@/lib/api";
 
+// ── Body parsing ──
+
 function parseBody(raw: string): Array<{ key: string; value: string }> | null {
   if (!raw) return null;
   try {
     const obj = JSON.parse(raw) as unknown;
     if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-      // Handle {url, form:{...}} beacon shape
       const rec = obj as Record<string, unknown>;
       const inner = rec.form ?? rec.data ?? rec;
       if (inner && typeof inner === "object" && !Array.isArray(inner)) {
@@ -56,19 +57,18 @@ function extractUrl(raw: string): string | null {
   } catch { return null; }
 }
 
-/** Determine whether a field name is a credential, sensitive, or normal value — uses Set for O(1) lookups. */
 function fieldType(key: string): "credential" | "sensitive" | "normal" {
   const lower = key.toLowerCase();
   if (CREDENTIAL_FIELDS.has(lower)) return "credential";
   if (SENSITIVE_FIELDS.has(lower)) return "sensitive";
-  // Fallback: scan for partial matches (e.g. "new_password" matches "password")
   for (const f of CREDENTIAL_FIELDS) {
     if (lower.includes(f)) return SENSITIVE_FIELDS.has(f) ? "sensitive" : "credential";
   }
   return "normal";
 }
 
-/** Copy-to-clipboard button with animated check feedback. */
+// ── Mini components ──
+
 const CopyBtn = memo(function CopyBtn({ value }: { value: string }) {
   const [done, setDone] = useState(false);
   const copy = useCallback(async () => {
@@ -77,13 +77,12 @@ const CopyBtn = memo(function CopyBtn({ value }: { value: string }) {
     setTimeout(() => setDone(false), 1400);
   }, [value]);
   return (
-    <Pressable onPress={copy} hitSlop={8} style={({ pressed }) => [styles.copyBtn, pressed && styles.pressed]}>
+    <Pressable onPress={copy} hitSlop={8} style={({ pressed }) => [styles.copyIcon, pressed && styles.pressed]}>
       {done ? <Check size={11} color={theme.colors.ok} /> : <Copy size={11} color={theme.colors.textFaint} />}
     </Pressable>
   );
 });
 
-// ── Simple credential table row ──
 const CredRow = memo(function CredRow({ label, value, type }: { label: string; value: string; type: "sensitive" | "credential" | "normal" }) {
   return (
     <View style={[styles.tblRow, type === "sensitive" && styles.tblRowSens, type === "credential" && styles.tblRowCred]}>
@@ -105,14 +104,14 @@ const CredRow = memo(function CredRow({ label, value, type }: { label: string; v
   );
 });
 
-// ── One row in the capture list inside a target group ──
+// ── Capture row inside a group ──
+
 const CaptureRow = memo(function CaptureRow({ capture, expanded, onToggle }: { capture: InterceptCapture; expanded: boolean; onToggle: () => void }) {
   const ts = new Date(capture.ts).toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
   const fields = parseBody(capture.reqBody) ?? [];
   const captureUrl = extractUrl(capture.reqBody);
   const credFields = fields.filter(f => fieldType(f.key) !== "normal");
   const otherFields = fields.filter(f => fieldType(f.key) === "normal");
-  const hasData = fields.length > 0;
 
   return (
     <View style={styles.captureRow}>
@@ -125,31 +124,23 @@ const CaptureRow = memo(function CaptureRow({ capture, expanded, onToggle }: { c
         <View style={styles.captureRowRight}>
           {credFields.length > 0 && (
             <View style={styles.credCountBadge}>
-              <ShieldAlert size={9} color={theme.colors.warn} />
+              <ShieldAlert size={8} color={theme.colors.warn} />
               <Text style={styles.credCountText}>{credFields.length}</Text>
             </View>
           )}
-          {expanded
-            ? <ChevronDown size={13} color={theme.colors.textFaint} />
-            : <ChevronRight size={13} color={theme.colors.textFaint} />}
+          {expanded ? <ChevronDown size={12} color={theme.colors.textFaint} /> : <ChevronRight size={12} color={theme.colors.textFaint} />}
         </View>
       </Pressable>
-
       {expanded && (
         <View style={styles.captureDetail}>
-          {hasData ? (
+          {fields.length > 0 ? (
             <View style={styles.tbl}>
-              {/* Table header */}
               <View style={styles.tblHeader}>
                 <Text style={[styles.tblHeaderCell, { flex: 1 }]}>FIELD</Text>
                 <Text style={[styles.tblHeaderCell, { flex: 2 }]}>VALUE</Text>
               </View>
-              {credFields.map(f => (
-                <CredRow key={f.key} label={f.key} value={f.value} type={fieldType(f.key)} />
-              ))}
-              {otherFields.map(f => (
-                <CredRow key={f.key} label={f.key} value={f.value} type="normal" />
-              ))}
+              {credFields.map(f => (<CredRow key={f.key} label={f.key} value={f.value} type={fieldType(f.key)} />))}
+              {otherFields.map(f => (<CredRow key={f.key} label={f.key} value={f.value} type="normal" />))}
             </View>
           ) : (
             <View style={styles.captureRawBlock}>
@@ -162,7 +153,8 @@ const CaptureRow = memo(function CaptureRow({ capture, expanded, onToggle }: { c
   );
 });
 
-// ── All captures grouped under one target slug ──
+// ── Group per proxy slug ──
+
 function TargetGroup({ slug, captures }: { slug: string; captures: InterceptCapture[] }) {
   const [open, setOpen] = useState(true);
   const [expandedId, setExpandedId] = useState<number | null>(null);
@@ -188,7 +180,6 @@ function TargetGroup({ slug, captures }: { slug: string; captures: InterceptCapt
 
   return (
     <View style={styles.targetGroup}>
-      {/* Group header */}
       <Pressable onPress={() => setOpen(v => !v)} style={({ pressed }) => [styles.targetGroupHead, pressed && styles.pressed]}>
         <View style={styles.targetGroupLeft}>
           <ShieldAlert size={14} color={theme.colors.warn} />
@@ -203,18 +194,16 @@ function TargetGroup({ slug, captures }: { slug: string; captures: InterceptCapt
               <Text style={styles.credCountText}>{allCreds.length} creds</Text>
             </View>
           )}
-          {open ? <ChevronDown size={15} color={theme.colors.textFaint} /> : <ChevronRight size={15} color={theme.colors.textFaint} />}
+          {open ? <ChevronDown size={14} color={theme.colors.textFaint} /> : <ChevronRight size={14} color={theme.colors.textFaint} />}
         </View>
       </Pressable>
-
       {open && (
         <View style={styles.targetGroupBody}>
-          {/* Unique credentials summary table */}
           {allCreds.length > 0 && (
             <View style={styles.credSummary}>
               <View style={styles.credSummaryHead}>
                 <ShieldAlert size={11} color={theme.colors.warn} />
-                <Text style={styles.credSummaryTitle}>UNIQUE CREDENTIALS CAPTURED</Text>
+                <Text style={styles.credSummaryTitle}>CERTIFIED CREDENTIALS</Text>
               </View>
               <View style={styles.tbl}>
                 <View style={styles.tblHeader}>
@@ -227,17 +216,10 @@ function TargetGroup({ slug, captures }: { slug: string; captures: InterceptCapt
               </View>
             </View>
           )}
-
-          {/* Individual capture rows */}
           <View style={styles.captureList}>
-            <Text style={styles.captureListTitle}>ALL REQUESTS ({captures.length})</Text>
+            <Text style={styles.captureListTitle}>All requests ({captures.length})</Text>
             {[...captures].reverse().map(c => (
-              <CaptureRow
-                key={c.id}
-                capture={c}
-                expanded={expandedId === c.id}
-                onToggle={() => setExpandedId(v => v === c.id ? null : c.id)}
-              />
+              <CaptureRow key={c.id} capture={c} expanded={expandedId === c.id} onToggle={() => setExpandedId(v => v === c.id ? null : c.id)} />
             ))}
           </View>
         </View>
@@ -245,6 +227,8 @@ function TargetGroup({ slug, captures }: { slug: string; captures: InterceptCapt
     </View>
   );
 }
+
+// ── Main screen ──
 
 export default function InterceptsScreen() {
   const insets = useSafeAreaInsets();
@@ -278,10 +262,7 @@ export default function InterceptsScreen() {
 
   const wipe = useCallback(() => {
     const run = () => deleteAll.mutate();
-    if (Platform.OS === "web") {
-      run();
-      return;
-    }
+    if (Platform.OS === "web") { run(); return; }
     Alert.alert("Clear all captures", "Permanently delete all intercept captures?", [
       { text: "Cancel", style: "cancel" },
       { text: "Clear all", style: "destructive", onPress: run },
@@ -292,21 +273,15 @@ export default function InterceptsScreen() {
     try {
       const result = await harExport.mutateAsync();
       if (Platform.OS === "web") {
-        // Web: trigger download via blob URL.
         const blob = new Blob([result.harJson], { type: "application/har+json" });
         const url = URL.createObjectURL(blob);
-        const a = document.createElement("a");
-        a.href = url;
-        a.download = result.fileName;
-        a.click();
+        const a = document.createElement("a"); a.href = url; a.download = result.fileName; a.click();
         URL.revokeObjectURL(url);
       } else {
-        // Mobile: share the file.
         await Share.share({ message: result.harJson, title: result.fileName });
       }
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Export failed";
-      Alert.alert("HAR Export", msg);
+      Alert.alert("HAR Export", e instanceof Error ? e.message : "Export failed");
     }
   }, [harExport]);
 
@@ -319,34 +294,23 @@ export default function InterceptsScreen() {
       const report = await replay.mutateAsync({ har: harPaste.trim(), proxySlug: replaySlug.trim() });
       setReplayResult(report);
     } catch (e: unknown) {
-      const msg = e instanceof Error ? e.message : "Replay failed";
-      Alert.alert("Replay Error", msg);
+      Alert.alert("Replay Error", e instanceof Error ? e.message : "Replay failed");
     }
   }, [harPaste, replaySlug, replay]);
 
   return (
     <View style={styles.root}>
-      <LinearGradient
-        colors={["rgba(255,178,62,0.14)", "transparent"]}
-        start={{ x: 0.1, y: 0 }}
-        end={{ x: 0.9, y: 0.5 }}
-        style={styles.glow}
-        pointerEvents="none"
-      />
+      <LinearGradient colors={["rgba(255,178,62,0.12)", "transparent"]} start={{ x: 0.1, y: 0 }} end={{ x: 0.9, y: 0.5 }} style={styles.glow} pointerEvents="none" />
       <ScrollView
-        contentContainerStyle={[
-          styles.content,
-          { paddingTop: insets.top + theme.spacing(6) },
-        ]}
+        contentContainerStyle={[styles.content, { paddingTop: insets.top + theme.spacing(6) }]}
         showsVerticalScrollIndicator={false}
       >
+        {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
             <View style={styles.eyebrowRow}>
               <Text style={styles.eyebrow}>INTERCEPT LAB</Text>
-              {isFetching && !isLoading && (
-                <RefreshCw size={11} color={theme.colors.warn} />
-              )}
+              {isFetching && !isLoading && <RefreshCw size={10} color={theme.colors.warn} />}
             </View>
             <View style={styles.heroRow}>
               <Text style={styles.hero}>Captures</Text>
@@ -354,74 +318,34 @@ export default function InterceptsScreen() {
                 <Text style={styles.countBadgeText}>{captures.length}</Text>
               </View>
             </View>
-            {lastUpdated && (
-              <Text style={styles.liveTag}>LIVE · {lastUpdated}</Text>
-            )}
-          </View>
-          <View style={styles.actionRow}>
-            {captures.length > 0 ? (
-              <>
-                <Pressable
-                  onPress={exportHar}
-                  disabled={harExport.isPending}
-                  style={({ pressed }) => [
-                    styles.actionBtn,
-                    styles.harBtn,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Download size={13} color={theme.colors.accent} />
-                  <Text style={styles.actionText}>
-                    {harExport.isPending ? "Exporting…" : "HAR"}
-                  </Text>
-                </Pressable>
-                <Pressable
-                  onPress={() => { setShowReplay(true); setReplayResult(null); }}
-                  style={({ pressed }) => [
-                    styles.actionBtn,
-                    styles.playBtn,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Play size={13} color={theme.colors.cyan} />
-                  <Text style={[styles.actionText, { color: theme.colors.cyan }]}>Replay</Text>
-                </Pressable>
-                <Pressable
-                  onPress={wipe}
-                  disabled={deleteAll.isPending}
-                  style={({ pressed }) => [
-                    styles.actionBtn,
-                    styles.clearBtn,
-                    pressed && styles.pressed,
-                  ]}
-                >
-                  <Trash2 size={13} color={theme.colors.danger} />
-                  <Text style={[styles.actionText, { color: theme.colors.danger }]}>
-                    {deleteAll.isPending ? "Clearing…" : "Clear"}
-                  </Text>
-                </Pressable>
-              </>
-            ) : (
-              <Pressable
-                onPress={() => { setShowReplay(true); setReplayResult(null); }}
-                style={({ pressed }) => [
-                  styles.actionBtn,
-                  styles.playBtn,
-                  pressed && styles.pressed,
-                ]}
-              >
-                <Play size={13} color={theme.colors.cyan} />
-                <Text style={[styles.actionText, { color: theme.colors.cyan }]}>Replay HAR</Text>
-              </Pressable>
-            )}
+            {lastUpdated && <Text style={styles.liveTag}>LIVE · {lastUpdated}</Text>}
           </View>
         </View>
 
+        {/* Quick actions row */}
+        <View style={styles.quickActions}>
+          {captures.length > 0 && (
+            <>
+              <Pressable onPress={exportHar} disabled={harExport.isPending} style={({ pressed }) => [styles.quickBtn, styles.harBtn, pressed && styles.pressed]}>
+                {harExport.isPending ? <ActivityIndicator size="small" color={theme.colors.accent} /> : <Download size={14} color={theme.colors.accent} />}
+                <Text style={styles.quickText}>Export HAR</Text>
+              </Pressable>
+              <Pressable onPress={() => { setShowReplay(true); setReplayResult(null); }} style={({ pressed }) => [styles.quickBtn, styles.playBtn, pressed && styles.pressed]}>
+                <Play size={14} color={theme.colors.cyan} />
+                <Text style={[styles.quickText, { color: theme.colors.cyan }]}>Replay</Text>
+              </Pressable>
+              <Pressable onPress={wipe} disabled={deleteAll.isPending} style={({ pressed }) => [styles.quickBtn, styles.clearBtn, pressed && styles.pressed]}>
+                <Trash2 size={14} color={theme.colors.danger} />
+                <Text style={[styles.quickText, { color: theme.colors.danger }]}>Clear</Text>
+              </Pressable>
+            </>
+          )}
+        </View>
+
+        {/* Content */}
         {isError ? (
           <View style={styles.stateCard}>
-            <Text style={styles.errorText}>
-              {error?.message ?? "Could not load intercept captures."}
-            </Text>
+            <Text style={styles.errorText}>{error?.message ?? "Could not load intercept captures."}</Text>
           </View>
         ) : isLoading ? (
           <View style={styles.stateCard}>
@@ -430,14 +354,10 @@ export default function InterceptsScreen() {
           </View>
         ) : captures.length === 0 ? (
           <View style={styles.stateCard}>
-            <ShieldAlert size={28} color={theme.colors.textFaint} />
-            <Text style={styles.stateText}>
-              No captures yet.
-            </Text>
+            <ShieldAlert size={32} color={theme.colors.textFaint} />
+            <Text style={styles.stateText}>No captures yet.</Text>
             <Text style={styles.stateHint}>
-              Enable intercept lab mode in your Worker settings, then toggle
-              "Intercept" on a proxy target. Proxied traffic through that target
-              will appear here with masked sensitive values.
+              Toggle "Intercept" on a proxy target to start capturing credentials, forms, and request data from proxied traffic.
             </Text>
           </View>
         ) : (
@@ -449,13 +369,8 @@ export default function InterceptsScreen() {
         )}
       </ScrollView>
 
-      {/* ── Replay Modal ── */}
-      <Modal
-        visible={showReplay}
-        animationType="slide"
-        presentationStyle="pageSheet"
-        onRequestClose={() => setShowReplay(false)}
-      >
+      {/* Replay modal */}
+      <Modal visible={showReplay} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowReplay(false)}>
         <View style={[styles.root, { paddingTop: insets.top + theme.spacing(4) }]}>
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Har Replay Engine</Text>
@@ -465,71 +380,30 @@ export default function InterceptsScreen() {
           </View>
           <ScrollView contentContainerStyle={styles.modalContent} showsVerticalScrollIndicator={false}>
             <Text style={styles.modalHint}>
-              Paste a HAR (HTTP Archive) JSON blob and specify which proxy target to replay against.
-              The engine will sequentially execute every request, tracking cookies across responses,
-              and extract credentials/tokens from the flow.
+              Paste a HAR (HTTP Archive) JSON blob and specify which proxy target to replay against. The engine sequentially executes every request, tracks cookies, and extracts tokens from the flow.
             </Text>
-
             <View style={styles.modalField}>
               <Text style={styles.modalLabel}>PROXY SLUG</Text>
-              <TextInput
-                style={styles.modalInput}
-                value={replaySlug}
-                onChangeText={setReplaySlug}
-                placeholder="e.g. my-target"
-                placeholderTextColor={theme.colors.textFaint}
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
+              <TextInput style={styles.modalInput} value={replaySlug} onChangeText={setReplaySlug} placeholder="e.g. my-target" placeholderTextColor={theme.colors.textFaint} autoCapitalize="none" autoCorrect={false} />
             </View>
-
             <View style={styles.modalField}>
               <Text style={styles.modalLabel}>HAR JSON</Text>
-              <TextInput
-                style={[styles.modalInput, styles.modalInputLarge]}
-                value={harPaste}
-                onChangeText={setHarPaste}
-                placeholder='Paste HAR JSON here (usually starts with {"log":...})'
-                placeholderTextColor={theme.colors.textFaint}
-                multiline
-                textAlignVertical="top"
-                autoCapitalize="none"
-                autoCorrect={false}
-              />
+              <TextInput style={[styles.modalInput, styles.modalInputLarge]} value={harPaste} onChangeText={setHarPaste} placeholder='Paste HAR JSON here ({"log":...})' placeholderTextColor={theme.colors.textFaint} multiline textAlignVertical="top" autoCapitalize="none" autoCorrect={false} />
             </View>
-
-            <Pressable
-              onPress={runReplay}
-              disabled={replay.isPending}
-              style={({ pressed }) => [
-                styles.modalRunBtn,
-                pressed && styles.pressed,
-                replay.isPending && { opacity: 0.5 },
-              ]}
-            >
-              {replay.isPending ? (
-                <ActivityIndicator color={theme.colors.bg} size="small" />
-              ) : (
-                <Play size={16} color={theme.colors.bg} />
-              )}
-              <Text style={styles.modalRunText}>
-                {replay.isPending ? "Replaying…" : "Run Replay"}
-              </Text>
+            <Pressable onPress={runReplay} disabled={replay.isPending} style={({ pressed }) => [styles.modalRunBtn, pressed && styles.pressed, replay.isPending && { opacity: 0.5 }]}>
+              {replay.isPending ? <ActivityIndicator color={theme.colors.bg} size="small" /> : <Play size={16} color={theme.colors.bg} />}
+              <Text style={styles.modalRunText}>{replay.isPending ? "Replaying…" : "Run Replay"}</Text>
             </Pressable>
-
             {replayResult && (
               <View style={styles.replayResult}>
                 <View style={styles.replayResultHead}>
                   <Text style={styles.replayResultTitle}>REPLAY REPORT</Text>
                   <View style={styles.replayResultStats}>
-                    <Text style={styles.replayStatOk}>{replayResult.succeeded} succeeded</Text>
-                    {replayResult.failed > 0 && (
-                      <Text style={styles.replayStatFail}>{replayResult.failed} failed</Text>
-                    )}
+                    <Text style={styles.replayStatOk}>{replayResult.succeeded} ok</Text>
+                    {replayResult.failed > 0 && <Text style={styles.replayStatFail}>{replayResult.failed} failed</Text>}
                     <Text style={styles.replayStatTotal}>{replayResult.total} total</Text>
                   </View>
                 </View>
-
                 {replayResult.extractedTokens.length > 0 && (
                   <View style={styles.replayTokens}>
                     <View style={styles.replayTokensHead}>
@@ -544,12 +418,10 @@ export default function InterceptsScreen() {
                     ))}
                   </View>
                 )}
-
                 <View style={styles.replayFlow}>
                   <Text style={styles.replayFlowTitle}>FLOW SUMMARY</Text>
                   <Text style={styles.replayFlowText} selectable>{replayResult.flowSummary}</Text>
                 </View>
-
                 <View style={styles.replayEntries}>
                   <Text style={styles.replayEntriesTitle}>REQUEST LOG</Text>
                   {replayResult.entries.map((entry) => (
@@ -562,9 +434,7 @@ export default function InterceptsScreen() {
                       <Text style={styles.replayEntryUrl} numberOfLines={1}>{entry.url}</Text>
                       {entry.error && <Text style={styles.replayEntryError}>{entry.error}</Text>}
                       {entry.redirectUrl && <Text style={styles.replayEntryRedirect}>→ {entry.redirectUrl}</Text>}
-                      {entry.cookies.length > 0 && (
-                        <Text style={styles.replayEntryCookies}>{entry.cookies.length} cookie(s) set</Text>
-                      )}
+                      {entry.cookies.length > 0 && <Text style={styles.replayEntryCookies}>{entry.cookies.length} cookie(s)</Text>}
                     </View>
                   ))}
                 </View>
@@ -581,7 +451,7 @@ const styles = StyleSheet.create({
   root: { flex: 1, backgroundColor: theme.colors.bg },
   glow: { position: "absolute", top: 0, left: 0, right: 0, height: 280 },
   content: { paddingHorizontal: theme.spacing(4), paddingBottom: theme.spacing(12), gap: theme.spacing(4) },
-  header: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start", gap: theme.spacing(3) },
+  header: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
   headerLeft: { flex: 1, gap: theme.spacing(1) },
   eyebrowRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5) },
   heroRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2) },
@@ -591,21 +461,21 @@ const styles = StyleSheet.create({
   countBadgeActive: { backgroundColor: "rgba(255,178,62,0.15)", borderColor: "rgba(255,178,62,0.4)" },
   countBadgeText: { color: theme.colors.warn, fontSize: 12, fontWeight: "800", fontFamily: theme.font.mono },
   liveTag: { color: theme.colors.warn, fontSize: 10, fontWeight: "700", letterSpacing: 1, fontFamily: theme.font.mono, opacity: 0.7 },
-  actionRow: { flexDirection: "row", gap: theme.spacing(2), flexWrap: "wrap" },
-  actionBtn: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5), backgroundColor: theme.colors.surface, borderRadius: theme.radius.sm, borderWidth: 1, paddingHorizontal: theme.spacing(2.5), paddingVertical: theme.spacing(2) },
-  harBtn: { borderColor: theme.colors.accent },
-  playBtn: { borderColor: theme.colors.cyan },
-  clearBtn: { borderColor: theme.colors.danger },
-  actionText: { color: theme.colors.accent, fontSize: 11, fontWeight: "700" },
+  quickActions: { flexDirection: "row", gap: theme.spacing(2), flexWrap: "wrap" },
+  quickBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(1.5), borderRadius: theme.radius.sm, borderWidth: 1, paddingHorizontal: theme.spacing(2), paddingVertical: theme.spacing(2.5) },
+  harBtn: { borderColor: theme.colors.accent, backgroundColor: theme.colors.surface },
+  playBtn: { borderColor: theme.colors.cyan, backgroundColor: theme.colors.surface },
+  clearBtn: { borderColor: theme.colors.danger, backgroundColor: theme.colors.surface },
+  quickText: { color: theme.colors.accent, fontSize: 11, fontWeight: "700" },
   stateCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(6), gap: theme.spacing(3), alignItems: "center" },
   stateText: { color: theme.colors.textDim, fontSize: 14, lineHeight: 21, textAlign: "center" },
   stateHint: { color: theme.colors.textFaint, fontSize: 12, lineHeight: 18, textAlign: "center", fontFamily: theme.font.mono },
   errorText: { color: theme.colors.danger, fontSize: 14, fontFamily: theme.font.mono, textAlign: "center" },
   list: { gap: theme.spacing(3) },
   pressed: { opacity: 0.55 },
-  copyBtn: { paddingTop: 2 },
+  copyIcon: { paddingTop: 2 },
 
-  // ── Target group (per-slug section) ──
+  // Target group
   targetGroup: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, overflow: "hidden" },
   targetGroupHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: theme.spacing(3), gap: theme.spacing(3) },
   targetGroupLeft: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2.5), flex: 1 },
@@ -616,12 +486,12 @@ const styles = StyleSheet.create({
   credCountText: { color: theme.colors.warn, fontSize: 10, fontWeight: "800", fontFamily: theme.font.mono },
   targetGroupBody: { borderTopWidth: 1, borderTopColor: theme.colors.border },
 
-  // ── Credential summary table ──
+  // Credential summary
   credSummary: { borderBottomWidth: 1, borderBottomColor: theme.colors.border },
   credSummaryHead: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5), paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2), backgroundColor: "rgba(255,178,62,0.07)" },
   credSummaryTitle: { color: theme.colors.warn, fontSize: 10, fontWeight: "800", letterSpacing: 1.2, fontFamily: theme.font.mono },
 
-  // ── Generic table ──
+  // Table
   tbl: { overflow: "hidden" },
   tblHeader: { flexDirection: "row", backgroundColor: theme.colors.bg, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(1.5), borderBottomWidth: 1, borderBottomColor: theme.colors.border },
   tblHeaderCell: { color: theme.colors.textFaint, fontSize: 9, fontWeight: "800", letterSpacing: 1, fontFamily: theme.font.mono },
@@ -639,7 +509,7 @@ const styles = StyleSheet.create({
   tblValSens: { color: "#f87171", fontWeight: "700" },
   tblValCred: { color: theme.colors.warn, fontWeight: "700" },
 
-  // ── Individual capture rows ──
+  // Capture rows
   captureList: { borderTopWidth: 1, borderTopColor: theme.colors.border },
   captureListTitle: { color: theme.colors.textFaint, fontSize: 9, fontWeight: "800", letterSpacing: 1, fontFamily: theme.font.mono, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(1.5), backgroundColor: theme.colors.bg },
   captureRow: { borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.04)" },
@@ -653,40 +523,21 @@ const styles = StyleSheet.create({
   captureRawBlock: { padding: theme.spacing(3) },
   captureRawText: { color: theme.colors.textDim, fontSize: 11, fontFamily: theme.font.mono, lineHeight: 17 },
 
-  // ── Replay modal ──
+  // Modal
   modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: theme.spacing(4), paddingVertical: theme.spacing(3), borderBottomWidth: 1, borderBottomColor: theme.colors.border },
-  modalTitle: { color: theme.colors.text, fontSize: 18, fontWeight: "800", letterSpacing: -0.3 },
+  modalTitle: { color: theme.colors.text, fontSize: 18, fontWeight: "800" },
   modalClose: { paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(1.5), backgroundColor: theme.colors.surface, borderRadius: theme.radius.sm },
   modalCloseText: { color: theme.colors.textDim, fontSize: 13, fontWeight: "600" },
   modalContent: { padding: theme.spacing(4), paddingBottom: theme.spacing(16), gap: theme.spacing(4) },
   modalHint: { color: theme.colors.textDim, fontSize: 13, lineHeight: 20, fontFamily: theme.font.mono },
   modalField: { gap: theme.spacing(1.5) },
   modalLabel: { color: theme.colors.textFaint, fontSize: 10, fontWeight: "800", letterSpacing: 1.2, fontFamily: theme.font.mono },
-  modalInput: {
-    backgroundColor: theme.colors.surface,
-    borderRadius: theme.radius.sm,
-    borderWidth: 1,
-    borderColor: theme.colors.border,
-    paddingHorizontal: theme.spacing(3),
-    paddingVertical: theme.spacing(2.5),
-    color: theme.colors.text,
-    fontSize: 14,
-    fontFamily: theme.font.mono,
-  },
+  modalInput: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2.5), color: theme.colors.text, fontSize: 14, fontFamily: theme.font.mono },
   modalInputLarge: { minHeight: 140, paddingTop: theme.spacing(2.5) },
-  modalRunBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: theme.spacing(2),
-    backgroundColor: theme.colors.cyan,
-    borderRadius: theme.radius.sm,
-    paddingVertical: theme.spacing(3),
-    paddingHorizontal: theme.spacing(4),
-  },
+  modalRunBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(2), backgroundColor: theme.colors.cyan, borderRadius: theme.radius.sm, paddingVertical: theme.spacing(3) },
   modalRunText: { color: theme.colors.bg, fontSize: 14, fontWeight: "800" },
 
-  // ── Replay results ──
+  // Replay result
   replayResult: { gap: theme.spacing(4) },
   replayResultHead: { gap: theme.spacing(1.5) },
   replayResultTitle: { color: theme.colors.cyan, fontSize: 12, fontWeight: "800", letterSpacing: 1.2, fontFamily: theme.font.mono },
