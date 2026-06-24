@@ -32,6 +32,14 @@ else
   echo "[start] no upstream proxy configured, skipping proxy adapter"
 fi
 
+# --- Authentication server (Railway PostgreSQL) --------------------------------
+if [ -n "${DATABASE_URL:-}" ]; then
+  echo "[start] launching auth server"
+  node /app/auth-server.js &
+else
+  echo "[start] DATABASE_URL not set, skipping auth server"
+fi
+
 # --- Gateway -----------------------------------------------------------------
 echo "[start] starting wrangler dev on 0.0.0.0:${PORT}"
 exec npx wrangler dev \

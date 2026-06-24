@@ -2227,6 +2227,16 @@ export default {
 
     const isConfigRoute = path === "/api/config";
     const isAuthRoute = path.startsWith("/api/auth/");
+
+    // Forward auth requests to the local Node.js auth server, which is backed
+    // by Railway PostgreSQL. The Workers runtime cannot speak Postgres directly.
+    if (isAuthRoute) {
+      const authUrl = `http://127.0.0.1:33337${path}${url.search}`;
+      const authReq = new Request(authUrl, request);
+      const authRes = await fetch(authReq);
+      return decorate(authRes, corsOrigin);
+    }
+
     if (
       path !== "/health" &&
       !isAuthRoute &&

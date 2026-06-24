@@ -13,6 +13,7 @@ COPY functions/wrangler.toml ./
 COPY functions/index.ts ./
 COPY functions/items-store.ts ./
 COPY functions/proxy-adapter.js ./
+COPY functions/auth-server.js ./
 COPY functions/start.sh ./
 COPY functions/brightdata_proxy_ca.crt ./
 
@@ -22,5 +23,5 @@ RUN chmod +x start.sh
 # Expose wrangler dev port
 EXPOSE 8787
 
-# Run the startup script, which launches the proxy adapter and then wrangler.
+# Run the startup script, which launches the proxy adapter, auth server, and then wrangler.
 CMD ["./start.sh"]
