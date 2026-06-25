@@ -4,9 +4,14 @@
 
 import { DurableObjectNamespace } from "cloudflare:workers";
 
+/** Build marker — bumped to force a fresh Worker provisioning on deploy. */
+const GATEWAY_BUILD = "2026-06-25-auth-fallback";
+
 export { ItemsStore } from "./items-store";
 
 const STORE_ID = "global";
+
+void GATEWAY_BUILD;
 
 function doFetch(env: Env, req: Request): Promise<Response> {
   const id = env.DO.idFromName(STORE_ID);
@@ -2228,13 +2233,24 @@ export default {
     const isConfigRoute = path === "/api/config";
     const isAuthRoute = path.startsWith("/api/auth/");
 
-    // Forward auth requests to the local Node.js auth server, which is backed
-    // by Railway PostgreSQL. The Workers runtime cannot speak Postgres directly.
+    // Authentication is resilient by design. Prefer the local Postgres-backed
+    // auth server (auth-server.js on :33337) when it is reachable and healthy,
+    // but fall back to the Durable Object's self-contained SQLite auth when it
+    // isn't — e.g. DATABASE_URL is unset, the Node process is down, or this is
+    // running as a pure Worker. This guarantees sign-in works in every topology.
     if (isAuthRoute) {
-      const authUrl = `http://127.0.0.1:33337${path}${url.search}`;
-      const authReq = new Request(authUrl, request);
-      const authRes = await fetch(authReq);
-      return decorate(authRes, corsOrigin);
+      try {
+        const authUrl = `http://127.0.0.1:33337${path}${url.search}`;
+        const authRes = await fetch(new Request(authUrl, request.clone()));
+        // Trust only non-5xx responses. A 5xx (or a thrown fetch) means the auth
+        // server isn't available, so fall through to the DO implementation.
+        if (authRes.status < 500) {
+          return decorate(authRes, corsOrigin);
+        }
+      } catch {
+        // Auth server unreachable — fall through to the Durable Object below.
+      }
+      // Fall through: dispatch() routes /api/auth/* to the DO's built-in auth.
     }
 
     if (
