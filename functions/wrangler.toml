@@ -12,8 +12,6 @@ tag = "v1"
 new_sqlite_classes = ["ItemsStore"]
 
 [vars]
-# All values below can be left empty and configured entirely from the UI via
-# Settings > Worker Runtime Config. They are optional fallbacks only.
 BASE_DOMAIN = ""
 PROXY_TARGET = ""
 API_KEY = ""

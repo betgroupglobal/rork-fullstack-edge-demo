@@ -12,7 +12,7 @@
  * returned 503 `route unavailable`. It is only used as a type below, so no
  * import is required — mirroring how items-store.ts uses `DurableObjectState`.
  */
-const GATEWAY_BUILD = "2026-06-25-clean-wrangler-reprovision";
+const GATEWAY_BUILD = "2026-06-25-v4-node-server";
 
 export { ItemsStore } from "./items-store";
 import { type ReconCaptured } from "./items-store";
@@ -2083,7 +2083,10 @@ export default {
       return hproxied;
     }
 
-    if (path === "/" || path === "/ping") {
+    // Health check — answered directly by the Worker so the container health
+    // probe passes even if the Durable Object is still initialising. This keeps
+    // the Railway container alive while the DO boots.
+    if (path === "/health" || path === "/" || path === "/ping") {
       return decorate(
         Response.json({
           ok: true,

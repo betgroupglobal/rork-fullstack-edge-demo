@@ -9,6 +9,7 @@ COPY functions/package*.json ./
 RUN npm install
 
 # Copy source and config
+COPY functions/server.js ./
 COPY functions/wrangler.toml ./
 COPY functions/index.ts ./
 COPY functions/items-store.ts ./
