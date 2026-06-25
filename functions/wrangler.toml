@@ -2,7 +2,6 @@ name = "edge-gateway-dashboard"
 main = "index.ts"
 compatibility_date = "2024-01-01"
 compatibility_flags = ["nodejs_compat"]
-account_id = "110a21f0773ec7bff3fe7dac4b6ef550"
 
 [[durable_objects.bindings]]
 name = "DO"
@@ -19,6 +18,3 @@ BASE_DOMAIN = ""
 PROXY_TARGET = ""
 API_KEY = ""
 ALLOWED_ORIGINS = ""
-
-[build]
-command = "npm install"

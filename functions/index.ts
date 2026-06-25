@@ -2,6 +2,18 @@
 // ItemsStore Durable Object. It handles CORS, security headers, per-IP rate
 // limiting (in the DO), and real edge caching for GET reads via the Cache API.
 
+/**
+ * Build marker — bumped to force a fresh Worker provisioning on deploy.
+ *
+ * `DurableObjectNamespace` is a GLOBAL type from the Workers runtime, not a
+ * runtime export of `cloudflare:workers`. Importing it as a value made the
+ * Worker throw at module load ("does not provide an export named
+ * 'DurableObjectNamespace'"), so the script never booted and every route
+ * returned 503 `route unavailable`. It is only used as a type below, so no
+ * import is required — mirroring how items-store.ts uses `DurableObjectState`.
+ */
+const GATEWAY_BUILD = "2026-06-25-clean-wrangler-reprovision";
+
 export { ItemsStore } from "./items-store";
 import { type ReconCaptured } from "./items-store";
 
@@ -2076,6 +2088,7 @@ export default {
         Response.json({
           ok: true,
           gateway: "edge-gateway-dashboard",
+          build: GATEWAY_BUILD,
           timestamp: new Date().toISOString(),
         }),
         corsOrigin,
@@ -2284,6 +2297,13 @@ export default {
     }
 
     const isConfigRoute = path === "/api/config";
+    const isAuthRoute = path.startsWith("/api/auth/");
+
+    // Authentication runs entirely inside the Durable Object, which owns a
+    // durable SQLite store for users and sessions (see items-store.ts). On
+    // Rork's managed Cloudflare hosting the DO is the single source of truth,
+    // so /api/auth/* is dispatched straight to it below — there is no external
+    // auth process to reach (a Worker cannot connect to localhost).
 
     if (
       path !== "/health" &&
@@ -2295,6 +2315,7 @@ export default {
       !isIterate &&
       !isProxyConfig &&
       !isConfigRoute &&
+      !isAuthRoute &&
       !isWildcardDns &&
       !isWorkerRoutes &&
       !isBeacon
