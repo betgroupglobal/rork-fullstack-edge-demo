@@ -9,27 +9,114 @@ import {
   ScrollView,
   StyleSheet,
   Text,
+  TextInput,
   View,
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import WebView from "@/components/WebView";
 
+import OfflineCard from "@/components/OfflineCard";
 import PressableScale from "@/components/PressableScale";
 import PulseDot from "@/components/PulseDot";
 import { theme } from "@/constants/theme";
 import { useApiKey } from "@/hooks/useApiKey";
-import { useGeneratePhishlet, useIteratePhishlet, useProxies } from "@/hooks/useGateway";
-import { proxyUrl } from "@/lib/api";
+import { useGenerateLoginPhishlet, useGeneratePhishlet, useIteratePhishlet, useProxies } from "@/hooks/useGateway";
+import { getBaseUrl, proxyUrl } from "@/lib/api";
 import type { CritiqueEntry } from "@/lib/api";
 
-// ── Injected capture script — same deep probe as before ──
+// ── Focused login-form probe used by the PhishletGen-Automator mode ──
+const LOGIN_PROBE_SCRIPT = `
+(function() {
+  'use strict';
+  function visibleArea(el) {
+    var rect = el.getBoundingClientRect();
+    return Math.max(0, rect.width) * Math.max(0, rect.height);
+  }
+  function isHttps(action) {
+    try { return new URL(action, location.href).protocol === 'https:'; } catch(e) { return false; }
+  }
+  function hasPassword(form) { return !!form.querySelector('input[type="password"]'); }
+  function findBestLoginForm() {
+    var forms = Array.from(document.querySelectorAll('form')).filter(hasPassword);
+    if (forms.length === 0) return null;
+    var scored = forms.map(function(f) {
+      var action = f.action || location.href;
+      return { form: f, https: isHttps(action) ? 1 : 0, area: visibleArea(f), action: action };
+    });
+    scored.sort(function(a, b) {
+      if (b.https !== a.https) return b.https - a.https;
+      return b.area - a.area;
+    });
+    return scored[0].form;
+  }
+  function getLoginPath(form) {
+    try {
+      var action = form.action || location.href;
+      return new URL(action, location.href).pathname || '/';
+    } catch(e) { return '/'; }
+  }
+  function getSubmitSelector(form) {
+    if (form.id) return 'form#' + form.id;
+    if (form.name) return 'form[name="' + form.name + '"]';
+    if (form.className) {
+      var cls = form.className.split(/\\s+/).filter(Boolean)[0];
+      if (cls) return 'form.' + cls + ':has(> input[type="password"])';
+    }
+    return 'form:has(> input[type="password"])';
+  }
+  function getPasswordInput(form) { return form.querySelector('input[type="password"]'); }
+  function getUsernameInput(form, passwordInput) {
+    var inputs = Array.from(form.querySelectorAll('input'));
+    var pwIndex = passwordInput ? inputs.indexOf(passwordInput) : -1;
+    for (var i = pwIndex - 1; i >= 0; i--) {
+      var t = (inputs[i].type || 'text').toLowerCase();
+      if (t === 'text' || t === 'email' || t === 'tel') return inputs[i];
+    }
+    for (var j = 0; j < inputs.length; j++) {
+      var t2 = (inputs[j].type || 'text').toLowerCase();
+      if (t2 === 'text' || t2 === 'email' || t2 === 'tel') return inputs[j];
+    }
+    return null;
+  }
+  function extractLoginForm() {
+    var form = findBestLoginForm();
+    if (!form) return null;
+    var pw = getPasswordInput(form);
+    var user = getUsernameInput(form, pw);
+    var hidden = Array.from(form.querySelectorAll('input[type="hidden"]')).map(function(h) {
+      return { name: h.name || h.id || '', value: h.value || '' };
+    }).filter(function(h) { return h.name; });
+    return {
+      domain: location.hostname,
+      loginPath: getLoginPath(form),
+      submitSelector: getSubmitSelector(form),
+      usernameField: user ? (user.name || user.id || 'username') : 'username',
+      passwordField: pw ? (pw.name || pw.id || 'password') : 'password',
+      hiddenInputs: hidden
+    };
+  }
+  function send() {
+    var data = extractLoginForm();
+    if (data && window.ReactNativeWebView) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({ loginForm: data }));
+    }
+  }
+  send();
+  setTimeout(send, 1000);
+  setTimeout(send, 2500);
+})();
+`;
+
+// ── Injected capture script — enhanced probe for modern auth flows ──
 const CAPTURE_SCRIPT = `
 (function() {
   'use strict';
   var PH = window.__phishletCapture || (window.__phishletCapture = {
-    domains: [], urls: [], cookies: [], formFields: [],
+    domains: [], urls: [], cookies: [], formFields: [], hiddenInputs: [],
+    csrfFields: [], authLinks: [], apiEndpoints: [], scripts: [], forms: [],
     redirects: [], pageTitle: '', formAction: '', formMethod: '',
   });
+
   function findBestForm() {
     var forms = Array.from(document.querySelectorAll('form'));
     for (var i = 0; i < forms.length; i++) {
@@ -39,11 +126,35 @@ const CAPTURE_SCRIPT = `
       var inputs = forms[j].querySelectorAll('input');
       for (var k = 0; k < inputs.length; k++) {
         var n = (inputs[k].name || inputs[k].id || '').toLowerCase();
-        if (/user|email|login|username|account/.test(n)) return forms[j];
+        if (/user|email|login|username|account|identifier/.test(n)) return forms[j];
       }
     }
     return forms[0] || null;
   }
+
+  function recordUnique(key, value) {
+    if (!PH._seen) PH._seen = {};
+    if (!PH._seen[key]) PH._seen[key] = {};
+    var s = typeof value === 'string' ? value : JSON.stringify(value);
+    if (PH._seen[key][s]) return false;
+    PH._seen[key][s] = true;
+    if (!Array.isArray(PH[key])) PH[key] = [];
+    PH[key].push(value);
+    return true;
+  }
+
+  function absoluteUrl(href) {
+    try { return new URL(href, location.href).href; } catch(e) { return ''; }
+  }
+
+  function isAuthUrl(href) {
+    return /login|signin|sign-in|auth|register|signup|account|oauth|sso|saml|openid|password|forgot|token|/i.test(href);
+  }
+
+  function isApiUrl(href) {
+    return /\\/(api|graphql|oauth|token|auth|session|sessions|saml|login)\\b|\\.(api|graphql)$/i.test(href);
+  }
+
   function collect() {
     var payload = {};
     payload.pageTitle = document.title || '';
@@ -52,63 +163,139 @@ const CAPTURE_SCRIPT = `
       payload.formAction = bestForm.action || location.href;
       payload.formMethod = (bestForm.method || 'get').toLowerCase();
     }
+
     var allInputs = Array.from(document.querySelectorAll('input, select, textarea'));
     var seen = {};
     var fields = [];
+    var hidden = [];
+    var csrf = [];
     allInputs.forEach(function(el) {
       var key = el.name || el.id || el.placeholder || el.type;
       if (!key || seen[key]) return;
       seen[key] = true;
-      fields.push({ name: el.name || '', type: (el.type || 'text').toLowerCase(), id: el.id || '', placeholder: el.placeholder || '' });
+      var type = (el.type || 'text').toLowerCase();
+      var entry = {
+        name: el.name || '',
+        type: type,
+        id: el.id || '',
+        placeholder: el.placeholder || '',
+        required: !!el.required,
+        autocomplete: el.autocomplete || '',
+      };
+      fields.push(entry);
+      if (type === 'hidden') {
+        hidden.push({ name: el.name || '', value: el.value || '', id: el.id || '' });
+      }
+      var keyLower = key.toLowerCase();
+      if (/csrf|xsrf|token|nonce|state|_requesttoken|__viewstate/.test(keyLower)) {
+        csrf.push({ name: el.name || '', value: el.value || '', id: el.id || '' });
+      }
     });
     payload.formFields = fields;
+    payload.hiddenInputs = hidden;
+    payload.csrfFields = csrf;
+
     var rawCookies = document.cookie ? document.cookie.split(';') : [];
     var cookieNames = [];
     rawCookies.forEach(function(c) { var name = c.trim().split('=')[0].trim(); if (name) cookieNames.push(name); });
     payload.cookies = cookieNames;
     payload.allCookies = cookieNames;
+
     payload.urls = [location.href];
-    Array.from(document.querySelectorAll('a[href]')).forEach(function(a) {
-      var h = a.getAttribute('href') || '';
-      if (/login|signin|auth|register|signup|account|oauth|sso|password|forgot/i.test(h)) {
-        try { payload.urls.push(new URL(h, location.href).href); } catch(e) {}
+    payload.authLinks = [];
+    Array.from(document.querySelectorAll('a[href], button[data-href], [data-oauth-url]')).forEach(function(a) {
+      var h = a.getAttribute('href') || a.getAttribute('data-href') || a.getAttribute('data-oauth-url') || '';
+      if (!h) return;
+      var abs = absoluteUrl(h);
+      if (!abs) return;
+      var text = (a.textContent || '').trim().slice(0, 60);
+      if (isAuthUrl(h)) {
+        payload.urls.push(abs);
+        payload.authLinks.push({ href: abs, text: text });
+      } else if (isApiUrl(h)) {
+        payload.apiEndpoints.push(abs);
       }
     });
+
     payload.domains = [location.hostname];
+    payload.scripts = [];
     Array.from(document.querySelectorAll('a[href], img[src], script[src], link[href], iframe[src]')).forEach(function(el) {
       var attr = el.getAttribute('href') || el.getAttribute('src') || '';
       var m = attr.match(/^https?:\\/\\/([^/?#]+)/i);
-      if (m && m[1] !== location.hostname) payload.domains.push(m[1]);
+      if (m && m[1] !== location.hostname) {
+        payload.domains.push(m[1]);
+        if (el.tagName === 'SCRIPT' && attr) payload.scripts.push(m[1]);
+      }
     });
+
+    payload.forms = Array.from(document.querySelectorAll('form')).map(function(f) {
+      return {
+        action: absoluteUrl(f.action || location.href) || location.href,
+        method: (f.method || 'get').toLowerCase(),
+        id: f.id || '',
+        name: f.name || '',
+      };
+    });
+
     payload.redirects = [location.href];
-    ['urls','cookies','formFields','redirects','domains'].forEach(function(k) {
-      var existing = PH[k] || [];
+
+    ['urls','cookies','formFields','hiddenInputs','csrfFields','authLinks','apiEndpoints','scripts','forms','redirects','domains'].forEach(function(k) {
       var incoming = payload[k] || [];
-      incoming.forEach(function(v) {
-        var s = typeof v === 'string' ? v : JSON.stringify(v);
-        if (!PH._seen) PH._seen = {};
-        if (!PH._seen[k]) PH._seen[k] = {};
-        if (PH._seen[k][s]) return;
-        PH._seen[k][s] = true;
-        existing.push(v);
-      });
-      PH[k] = existing;
+      incoming.forEach(function(v) { recordUnique(k, v); });
     });
+
     if (payload.pageTitle) PH.pageTitle = payload.pageTitle;
     if (payload.formAction) PH.formAction = payload.formAction;
     if (payload.formMethod) PH.formMethod = payload.formMethod;
+
     window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
       urls: PH.urls, cookies: PH.cookies, formFields: PH.formFields,
+      hiddenInputs: PH.hiddenInputs, csrfFields: PH.csrfFields,
+      authLinks: PH.authLinks, apiEndpoints: PH.apiEndpoints,
+      scripts: PH.scripts, forms: PH.forms,
       redirects: PH.redirects, domains: PH.domains,
       pageTitle: PH.pageTitle, formAction: PH.formAction, formMethod: PH.formMethod
     }));
   }
+
+  // Hook XHR / fetch to capture API endpoints.
+  try {
+    var _fetch = window.fetch;
+    window.fetch = function() {
+      var arg = arguments[0];
+      var url = typeof arg === 'string' ? arg : (arg && arg.url) || '';
+      if (url && isApiUrl(url)) recordUnique('apiEndpoints', url);
+      return _fetch.apply(this, arguments);
+    };
+  } catch(e) {}
+  try {
+    var _XHR = window.XMLHttpRequest;
+    var HookedXHR = function() {
+      var xhr = new _XHR();
+      var _open = xhr.open;
+      xhr.open = function(method, url) {
+        if (url && isApiUrl(url)) recordUnique('apiEndpoints', url);
+        return _open.apply(xhr, arguments);
+      };
+      return xhr;
+    };
+    HookedXHR.prototype = _XHR.prototype;
+    window.XMLHttpRequest = HookedXHR;
+  } catch(e) {}
+
+  // Observe dynamic DOM changes (SPA forms, OAuth popups, etc).
+  try {
+    var observer = new MutationObserver(function() { collect(); });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+  } catch(e) {}
+
   (function(){
     var _ps = history.pushState, _rs = history.replaceState;
     history.pushState = function() { _ps.apply(this, arguments); setTimeout(collect, 800); };
     history.replaceState = function() { _rs.apply(this, arguments); setTimeout(collect, 800); };
     window.addEventListener('popstate', function() { setTimeout(collect, 800); });
   })();
+
   document.addEventListener('submit', function(e) {
     var f = e.target;
     if (f && f.tagName === 'FORM') { PH.formAction = f.action || location.href; PH.formMethod = (f.method || 'get').toLowerCase(); }
@@ -130,9 +317,10 @@ type Stage = "idle" | "scanning" | "generating" | "iterating" | "done";
 export default function ReconScreen() {
   const insets = useSafeAreaInsets();
   const ah = useApiKey();
-  const { data: proxies = [], isLoading, isError } = useProxies();
+  const { data: proxies = [], isLoading, isError, refetch } = useProxies();
   const generate = useGeneratePhishlet(ah);
   const iterate = useIteratePhishlet(ah);
+  const generateLogin = useGenerateLoginPhishlet(ah);
 
   const [selectedSlug, setSelectedSlug] = useState<string>("");
   const [captured, setCaptured] = useState<Record<string, unknown>>({});
@@ -144,10 +332,31 @@ export default function ReconScreen() {
   const [iterateResult, setIterateResult] = useState<{ critiques: CritiqueEntry[]; improvements: string[]; passes: number; score: number } | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
+  // Login-phishlet mode (PhishletGen-Automator)
+  const [loginMode, setLoginMode] = useState(false);
+  const [loginUrl, setLoginUrl] = useState<string>("");
+  const [loginYaml, setLoginYaml] = useState<string>("");
+  const [showAgentCommand, setShowAgentCommand] = useState(false);
+
   const selected = useMemo(
     () => proxies.find((p) => p.slug === selectedSlug),
     [proxies, selectedSlug],
   );
+
+  const agentCommand = useMemo(() => {
+    if (!selected || !loginUrl.trim()) return "";
+    try {
+      const url = new URL(loginUrl.trim());
+      if (url.protocol !== "http:" && url.protocol !== "https:") return "";
+    } catch { return ""; }
+    return `cd /Users/adminuser/rork-fullstack-edge-demo-1 && \\
+GATEWAY_BASE_URL=${getBaseUrl()} \\
+GATEWAY_API_KEY=$GATEWAY_API_KEY \\
+PROXY_ID=${selected.id} \\
+npx tsx agents/phishlet-constructor.ts \\
+  --target-url "${loginUrl.trim()}" \\
+  --authorized`;
+  }, [selected, loginUrl]);
 
   // Auto-select proxy if only one exists
   useEffect(() => {
@@ -163,11 +372,54 @@ export default function ReconScreen() {
     setGenerated("");
     setRefinedYaml("");
     setIterateResult(null);
+    setLoginMode(false);
+    setLoginYaml("");
     setStage("scanning");
     const url = proxyUrl(selected.slug);
     setActiveUrl(url);
     setWebviewKey((k) => k + 1);
   }, [selected]);
+
+  // ── PhishletGen-Automator: scan a direct URL for its login form ──
+  const runLoginScan = useCallback(() => {
+    if (!selected || !loginUrl.trim()) return;
+    try {
+      const url = new URL(loginUrl.trim());
+      if (url.protocol !== "http:" && url.protocol !== "https:") return;
+    } catch { return; }
+    setLoginMode(true);
+    setLoginYaml("");
+    setCaptured({});
+    setGenerated("");
+    setRefinedYaml("");
+    setIterateResult(null);
+    setActiveUrl(loginUrl.trim());
+    setWebviewKey((k) => k + 1);
+  }, [selected, loginUrl]);
+
+  // Auto-generate login phishlet when the focused probe reports a form.
+  useEffect(() => {
+    if (loginMode && captured.loginForm && !generateLogin.isPending && !loginYaml) {
+      const form = captured.loginForm as Record<string, unknown>;
+      generateLogin.mutate(
+        {
+          proxyId: selected!.id,
+          input: {
+            targetUrl: activeUrl || loginUrl,
+            loginForm: {
+              domain: form.domain as string | undefined,
+              loginPath: form.loginPath as string | undefined,
+              submitSelector: form.submitSelector as string | undefined,
+              usernameField: form.usernameField as string | undefined,
+              passwordField: form.passwordField as string | undefined,
+              hiddenInputs: (form.hiddenInputs as { name: string; value: string }[]) ?? [],
+            },
+          },
+        },
+        { onSuccess: (data) => setLoginYaml(data.phishlet) },
+      );
+    }
+  }, [loginMode, captured, generateLogin, loginYaml, activeUrl, loginUrl, selected]);
 
   // ── WebView message handler ──
   const onMessage = useCallback((event: { nativeEvent: { data?: string | Record<string, unknown> } }) => {
@@ -180,7 +432,10 @@ export default function ReconScreen() {
         typeof raw === "string" ? JSON.parse(raw) as Record<string, unknown> : raw;
       setCaptured((prev) => {
         const merged: Record<string, unknown> = { ...prev };
-        for (const key of ["urls", "cookies", "formFields", "redirects", "domains"]) {
+        for (const key of [
+          "urls", "cookies", "formFields", "hiddenInputs", "csrfFields",
+          "authLinks", "apiEndpoints", "scripts", "forms", "redirects", "domains",
+        ]) {
           const arr: unknown[] = Array.isArray(data[key]) ? data[key] as unknown[] : [];
           const existing = (merged[key] as unknown[]) ?? [];
           const seen = new Set(existing.map((v) => typeof v === "string" ? v : JSON.stringify(v)));
@@ -193,6 +448,9 @@ export default function ReconScreen() {
         if (data.pageTitle) merged.pageTitle = String(data.pageTitle);
         if (data.formAction) merged.formAction = String(data.formAction);
         if (data.formMethod) merged.formMethod = String(data.formMethod);
+        if (data.loginForm && typeof data.loginForm === "object") {
+          merged.loginForm = data.loginForm as Record<string, unknown>;
+        }
         return merged;
       });
     } catch { /* ignore */ }
@@ -210,12 +468,18 @@ export default function ReconScreen() {
       const cap = {
         urls: (captured.urls as string[]) ?? [],
         cookies: (captured.cookies as string[]) ?? [],
-        formFields: (captured.formFields as { name: string; type: string; id?: string; placeholder?: string }[]) ?? [],
+        formFields: (captured.formFields as { name: string; type: string; id?: string; placeholder?: string; required?: boolean; autocomplete?: string }[]) ?? [],
         redirects: (captured.redirects as string[]) ?? [],
         domains: (captured.domains as string[]) ?? [],
         pageTitle: captured.pageTitle as string | undefined,
         formAction: captured.formAction as string | undefined,
         formMethod: captured.formMethod as string | undefined,
+        hiddenInputs: (captured.hiddenInputs as { name: string; value: string; id?: string }[]) ?? [],
+        csrfFields: (captured.csrfFields as { name: string; value: string; id?: string }[]) ?? [],
+        authLinks: (captured.authLinks as { href: string; text: string }[]) ?? [],
+        apiEndpoints: (captured.apiEndpoints as string[]) ?? [],
+        scripts: (captured.scripts as string[]) ?? [],
+        forms: (captured.forms as { action: string; method: string; id?: string; name?: string }[]) ?? [],
       };
       generate.mutate(
         { proxyId: selected!.id, input: { targetUrl: selected!.targetUrl, captured: cap } },
@@ -231,12 +495,18 @@ export default function ReconScreen() {
       const cap = {
         urls: (captured.urls as string[]) ?? [],
         cookies: (captured.cookies as string[]) ?? [],
-        formFields: (captured.formFields as { name: string; type: string; id?: string; placeholder?: string }[]) ?? [],
+        formFields: (captured.formFields as { name: string; type: string; id?: string; placeholder?: string; required?: boolean; autocomplete?: string }[]) ?? [],
         redirects: (captured.redirects as string[]) ?? [],
         domains: (captured.domains as string[]) ?? [],
         pageTitle: captured.pageTitle as string | undefined,
         formAction: captured.formAction as string | undefined,
         formMethod: captured.formMethod as string | undefined,
+        hiddenInputs: (captured.hiddenInputs as { name: string; value: string; id?: string }[]) ?? [],
+        csrfFields: (captured.csrfFields as { name: string; value: string; id?: string }[]) ?? [],
+        authLinks: (captured.authLinks as { href: string; text: string }[]) ?? [],
+        apiEndpoints: (captured.apiEndpoints as string[]) ?? [],
+        scripts: (captured.scripts as string[]) ?? [],
+        forms: (captured.forms as { action: string; method: string; id?: string; name?: string }[]) ?? [],
       };
       iterate.mutate(
         { proxyId: selected!.id, phishlet: generated, captured: cap },
@@ -269,6 +539,9 @@ export default function ReconScreen() {
     setIterateResult(null);
     setStage("idle");
     setActiveUrl("");
+    setLoginMode(false);
+    setLoginUrl("");
+    setLoginYaml("");
   };
 
   const stageLabel: Record<Stage, string> = {
@@ -311,9 +584,7 @@ export default function ReconScreen() {
         {isLoading ? (
           <ActivityIndicator color={theme.colors.accent} />
         ) : isError ? (
-          <View style={styles.stateCard}>
-            <Text style={styles.errorText}>Could not load proxy targets.</Text>
-          </View>
+          <OfflineCard message="Could not load proxy targets." onRetry={() => refetch()} />
         ) : proxies.length === 0 ? (
           <View style={styles.stateCard}>
             <Radar size={28} color={theme.colors.textFaint} />
@@ -365,6 +636,109 @@ export default function ReconScreen() {
               )}
             </View>
 
+            {/* Login Phishlet Automator */}
+            {selected && (
+              <View style={[styles.controlCard, styles.loginCard]}>
+                <Text style={styles.controlLabel}>LOGIN PHISHLET AUTOMATOR</Text>
+                <View style={styles.loginRow}>
+                  <TextInput
+                    value={loginUrl}
+                    onChangeText={setLoginUrl}
+                    placeholder="https://target.com/login"
+                    placeholderTextColor={theme.colors.textFaint}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                    keyboardType="url"
+                    style={styles.loginInput}
+                  />
+                  <PressableScale
+                    haptic="medium"
+                    onPress={runLoginScan}
+                    disabled={!loginUrl.trim() || generateLogin.isPending}
+                    style={[
+                      styles.loginBtn,
+                      (!loginUrl.trim() || generateLogin.isPending) && styles.loginBtnDisabled,
+                    ]}
+                  >
+                    {generateLogin.isPending ? (
+                      <Loader size={14} color={theme.colors.bg} />
+                    ) : (
+                      <>
+                        <Fingerprint size={14} color={theme.colors.bg} />
+                        <Text style={styles.loginBtnText}>Generate</Text>
+                      </>
+                    )}
+                  </PressableScale>
+                </View>
+
+                {loginYaml ? (
+                  <View style={styles.loginYamlCard}>
+                    <View style={styles.loginYamlHeader}>
+                      <Text style={styles.loginYamlTitle}>Generated YAML</Text>
+                      <Pressable onPress={() => copy(loginYaml, "loginYaml")} style={styles.copyBtn}>
+                        {copiedField === "loginYaml" ? (
+                          <Check size={14} color={theme.colors.ok} />
+                        ) : (
+                          <Copy size={14} color={theme.colors.cyan} />
+                        )}
+                      </Pressable>
+                    </View>
+                    <Text style={styles.loginYamlApplied}>
+                      Applied to proxy: {selected?.name || selected?.slug}
+                    </Text>
+                    <Text style={styles.loginYaml} numberOfLines={12} ellipsizeMode="tail">
+                      {loginYaml}
+                    </Text>
+                  </View>
+                ) : loginMode && !captured.loginForm ? (
+                  <View style={styles.loginStatus}>
+                    <Loader size={14} color={theme.colors.accent} />
+                    <Text style={styles.loginStatusText}>Navigating and probing login form…</Text>
+                  </View>
+                ) : null}
+              </View>
+            )}
+
+            {/* Headless Agent workflow */}
+            {selected && (
+              <View style={[styles.controlCard, styles.agentCard]}>
+                <Text style={styles.controlLabel}>HEADLESS AGENT</Text>
+                <Text style={styles.agentSub}>
+                  Run the Puppeteer agent locally and have it upload the result back to this proxy.
+                </Text>
+                <PressableScale
+                  haptic="medium"
+                  onPress={() => setShowAgentCommand((s) => !s)}
+                  disabled={!agentCommand}
+                  style={[styles.agentToggle, !agentCommand && styles.agentToggleDisabled]}
+                >
+                  <Server size={14} color={theme.colors.bg} />
+                  <Text style={styles.agentToggleText}>
+                    {showAgentCommand ? "Hide command" : "Show command"}
+                  </Text>
+                </PressableScale>
+
+                {showAgentCommand && agentCommand ? (
+                  <View style={styles.agentCommandCard}>
+                    <View style={styles.loginYamlHeader}>
+                      <Text style={styles.loginYamlTitle}>Terminal command</Text>
+                      <Pressable onPress={() => copy(agentCommand, "agentCommand")} style={styles.copyBtn}>
+                        {copiedField === "agentCommand" ? (
+                          <Check size={14} color={theme.colors.ok} />
+                        ) : (
+                          <Copy size={14} color={theme.colors.cyan} />
+                        )}
+                      </Pressable>
+                    </View>
+                    <Text style={styles.agentCommand}>{agentCommand}</Text>
+                    <Text style={styles.agentNote}>
+                      Set GATEWAY_API_KEY in your terminal first, then paste and run. The agent will upload the YAML to proxy {selected?.name || selected?.slug} after validation.
+                    </Text>
+                  </View>
+                ) : null}
+              </View>
+            )}
+
             {/* Pipeline progress indicator */}
             {stage !== "idle" && (
               <View style={[styles.progressBar, { borderColor: stageColor[stage] }]}>
@@ -414,7 +788,7 @@ export default function ReconScreen() {
                   <WebView
                     key={webviewKey}
                     source={{ uri: activeUrl }}
-                    injectedJavaScript={CAPTURE_SCRIPT}
+                    injectedJavaScript={loginMode ? LOGIN_PROBE_SCRIPT : CAPTURE_SCRIPT}
                     onMessage={onMessage}
                     style={styles.webview}
                     javaScriptEnabled
@@ -451,6 +825,34 @@ export default function ReconScreen() {
                   <MiniMetric label="Cookies" value={(captured.cookies as string[])?.length ?? 0} />
                   <MiniMetric label="Domains" value={(captured.domains as string[])?.length ?? 0} />
                 </View>
+                <View style={styles.metrics}>
+                  <MiniMetric label="Hidden" value={(captured.hiddenInputs as unknown[])?.length ?? 0} />
+                  <MiniMetric label="CSRF" value={(captured.csrfFields as unknown[])?.length ?? 0} />
+                  <MiniMetric label="Auth URLs" value={(captured.authLinks as unknown[])?.length ?? 0} />
+                  <MiniMetric label="APIs" value={(captured.apiEndpoints as string[])?.length ?? 0} />
+                </View>
+                {(captured.authLinks as { href: string; text: string }[])?.length > 0 && (
+                  <View style={styles.detailList}>
+                    <Text style={styles.detailListTitle}>Auth links</Text>
+                    {(captured.authLinks as { href: string; text: string }[]).slice(0, 5).map((l, i) => (
+                      <View key={i} style={styles.detailRow}>
+                        <ExternalLink size={10} color={theme.colors.textFaint} />
+                        <Text style={styles.detailText} numberOfLines={1}>{l.text || l.href}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
+                {(captured.apiEndpoints as string[])?.length > 0 && (
+                  <View style={styles.detailList}>
+                    <Text style={styles.detailListTitle}>API endpoints</Text>
+                    {(captured.apiEndpoints as string[]).slice(0, 5).map((e, i) => (
+                      <View key={i} style={styles.detailRow}>
+                        <Server size={10} color={theme.colors.textFaint} />
+                        <Text style={styles.detailText} numberOfLines={1}>{e}</Text>
+                      </View>
+                    ))}
+                  </View>
+                )}
               </View>
             )}
 
@@ -556,6 +958,32 @@ const styles = StyleSheet.create({
   scanBtnText: { color: theme.colors.bg, fontSize: 14, fontWeight: "800" },
   pressed: { opacity: 0.55 },
 
+  // Login Phishlet Automator
+  loginCard: { gap: theme.spacing(3) },
+  loginRow: { flexDirection: "row", gap: theme.spacing(2) },
+  loginInput: { flex: 1, backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2.5), color: theme.colors.text, fontSize: 13, fontFamily: theme.font.mono },
+  loginBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(1.5), backgroundColor: theme.colors.accent, borderRadius: theme.radius.sm, paddingHorizontal: theme.spacing(4), paddingVertical: theme.spacing(2.5) },
+  loginBtnDisabled: { opacity: 0.5 },
+  loginBtnText: { color: theme.colors.bg, fontSize: 12, fontWeight: "800" },
+  loginYamlCard: { backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3), gap: theme.spacing(2) },
+  loginYamlHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  loginYamlTitle: { color: theme.colors.text, fontSize: 12, fontWeight: "700" },
+  copyBtn: { padding: theme.spacing(1) },
+  loginYaml: { color: theme.colors.textDim, fontSize: 10, fontFamily: theme.font.mono, lineHeight: 16 },
+  loginYamlApplied: { color: theme.colors.ok, fontSize: 10, fontFamily: theme.font.mono, marginTop: -theme.spacing(1) },
+  loginStatus: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2), paddingVertical: theme.spacing(2) },
+  loginStatusText: { color: theme.colors.textDim, fontSize: 12, fontFamily: theme.font.mono },
+
+  // Headless Agent
+  agentCard: { gap: theme.spacing(3) },
+  agentSub: { color: theme.colors.textDim, fontSize: 12, lineHeight: 18 },
+  agentToggle: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(1.5), backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingVertical: theme.spacing(2.5) },
+  agentToggleDisabled: { opacity: 0.5 },
+  agentToggleText: { color: theme.colors.text, fontSize: 12, fontWeight: "700" },
+  agentCommandCard: { backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3), gap: theme.spacing(2) },
+  agentCommand: { color: theme.colors.cyan, fontSize: 10, fontFamily: theme.font.mono, lineHeight: 16 },
+  agentNote: { color: theme.colors.textFaint, fontSize: 10, fontFamily: theme.font.mono, lineHeight: 15 },
+
   // Progress bar
   progressBar: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, paddingVertical: theme.spacing(3), paddingHorizontal: theme.spacing(4) },
   progressSteps: { flexDirection: "row", justifyContent: "space-between" },
@@ -583,6 +1011,12 @@ const styles = StyleSheet.create({
   miniMetric: { flex: 1, backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(2.5), alignItems: "center" },
   miniMetricValue: { color: theme.colors.text, fontSize: 16, fontWeight: "800", fontFamily: theme.font.mono },
   miniMetricLabel: { color: theme.colors.textFaint, fontSize: 9, fontWeight: "700", letterSpacing: 0.5, fontFamily: theme.font.mono, marginTop: 2 },
+
+  // Detail lists inside intel card
+  detailList: { gap: theme.spacing(1.5) },
+  detailListTitle: { color: theme.colors.textFaint, fontSize: 10, fontWeight: "700", letterSpacing: 0.5, fontFamily: theme.font.mono },
+  detailRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5) },
+  detailText: { color: theme.colors.textDim, fontSize: 10, fontFamily: theme.font.mono, flex: 1 },
 
   // Result cards
   resultCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(4), gap: theme.spacing(3) },

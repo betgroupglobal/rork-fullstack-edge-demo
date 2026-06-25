@@ -24,6 +24,7 @@ import {
   fetchTraffic,
   fetchWorkerConfig,
   fetchWorkerRoutes,
+  generateLoginPhishlet,
   generatePhishlet,
   iteratePhishlet,
   replayHar,
@@ -32,6 +33,7 @@ import {
   updateWorkerConfig,
   type HealthResult,
   type InterceptCapture,
+  type LoginPhishletInput,
   type ReconInput,
   type ReconResult,
   type IterateResult,
@@ -94,6 +96,8 @@ export function useProxies(): UseQueryResult<Proxy[], Error> {
     queryKey: queryKeys.proxies,
     queryFn: fetchProxies,
     refetchInterval: REFETCH_INTERVALS.proxies,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
     retry: 1,
   });
 }
@@ -143,6 +147,7 @@ export function useTraffic(): UseQueryResult<TrafficResult, Error> {
     queryKey: queryKeys.traffic,
     queryFn: fetchTraffic,
     refetchInterval: REFETCH_INTERVALS.traffic,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     retry: 1,
   });
@@ -153,6 +158,7 @@ export function useHealth(): UseQueryResult<HealthResult, Error> {
     queryKey: queryKeys.health,
     queryFn: fetchHealth,
     refetchInterval: REFETCH_INTERVALS.health,
+    refetchIntervalInBackground: false,
     refetchOnWindowFocus: true,
     retry: 1,
   });
@@ -275,11 +281,25 @@ export function useGeneratePhishlet(
   });
 }
 
+export function useGenerateLoginPhishlet(
+  authHeader?: string,
+): UseMutationResult<ReconResult, Error, { proxyId: number; input: LoginPhishletInput }> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ proxyId, input }) => generateLoginPhishlet(proxyId, input, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.proxies });
+    },
+  });
+}
+
 export function useWorkerRoutes(authHeader?: string): UseQueryResult<WorkerRoutesResult, Error> {
   return useQuery({
     queryKey: [...queryKeys.routes, authHeader],
     queryFn: () => fetchWorkerRoutes(authHeader),
     refetchInterval: REFETCH_INTERVALS.routes,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
     staleTime: 30_000,
     retry: 1,
   });

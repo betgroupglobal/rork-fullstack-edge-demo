@@ -1,0 +1,18 @@
+{
+  "name": "phishlet-constructor-agent",
+  "version": "1.0.0",
+  "description": "Standalone Puppeteer agent that builds a YAML phishlet from a target login page. For authorized security testing only.",
+  "type": "module",
+  "scripts": {
+    "build": "tsc --noEmit",
+    "run-agent": "tsx phishlet-constructor.ts"
+  },
+  "dependencies": {
+    "puppeteer": "^22.0.0"
+  },
+  "devDependencies": {
+    "tsx": "^4.7.0",
+    "typescript": "^5.3.0",
+    "@types/node": "^20.0.0"
+  }
+}

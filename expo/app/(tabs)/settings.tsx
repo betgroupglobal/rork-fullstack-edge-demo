@@ -44,12 +44,15 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import FadeIn from "@/components/FadeIn";
+import OfflineCard from "@/components/OfflineCard";
 import PressableScale from "@/components/PressableScale";
 import { theme } from "@/constants/theme";
 import {
   useDeleteWorkerConfig,
+  useDeleteWorkerRoute,
   useUpdateWorkerConfig,
   useWorkerConfig,
+  useWorkerRoutes,
 } from "@/hooks/useGateway";
 import { setBaseUrl } from "@/lib/api";
 
@@ -113,6 +116,7 @@ const CAPABILITIES = [
   { icon: Lock, title: "API key auth", body: "Bearer token authentication on all write endpoints and config changes." },
   { icon: Layers, title: "Runtime config", body: "Live config overrides persisted in the DO — no redeploy needed." },
   { icon: ArrowRight, title: "HAR replay engine", body: "Export captures as HAR and replay full sessions against any target." },
+  { icon: Server, title: "Worker route cleanup", body: "Remove stale Cloudflare Worker routes without leaving the app." },
 ];
 
 // ── Sub-components ──
@@ -231,6 +235,18 @@ export default function SettingsScreen() {
 
   useEffect(() => { if (!editDirty) setEdit({ ...FIELD_DEFAULT, ...(config.data ?? {}) }); }, [config.data, editDirty]);
 
+  // Worker routes cleanup
+  const routes = useWorkerRoutes(ah);
+  const deleteRoute = useDeleteWorkerRoute(ah);
+  const removeRoute = useCallback((routeId: string, zoneId: string, pattern: string) => {
+    const run = () => deleteRoute.mutate({ routeId, zoneId });
+    if (Platform.OS === "web") { run(); return; }
+    Alert.alert("Delete worker route", `Remove ${pattern}?`, [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: run },
+    ]);
+  }, [deleteRoute]);
+
   const updateField = useCallback((key: string, value: string) => { setEdit(prev => ({ ...prev, [key]: value })); setEditDirty(true); }, []);
   const saveConfig = useCallback(() => { updateConfig.mutate(edit, { onSuccess: () => setEditDirty(false) }); }, [edit, updateConfig]);
   const revertConfig = useCallback(() => {
@@ -331,6 +347,40 @@ export default function SettingsScreen() {
                 </PressableScale>
               )}
             </>
+          )}
+        </View>
+
+        {/* ── Worker Route Cleanup ── */}
+        <View style={styles.section}>
+          <View style={styles.sectionHead}>
+            <Server size={15} color={theme.colors.accent} />
+            <Text style={styles.sectionTitle}>Worker Route Cleanup</Text>
+          </View>
+          <Text style={styles.sectionDesc}>Remove stale Cloudflare Worker routes across all active zones.</Text>
+          {routes.isError ? (
+            <OfflineCard message={routes.error?.message ?? "Could not load worker routes."} onRetry={() => routes.refetch()} />
+          ) : routes.isLoading ? (
+            <View style={styles.loadRow}><ActivityIndicator size="small" color={theme.colors.accent} /><Text style={styles.loadText}>Loading routes…</Text></View>
+          ) : routes.data?.configured === false ? (
+            <View style={styles.configErr}><Shield size={18} color={theme.colors.warn} /><Text style={styles.configErrText}>Cloudflare credentials not configured.</Text></View>
+          ) : (routes.data?.routes?.length ?? 0) === 0 ? (
+            <View style={styles.stateCard}><Server size={22} color={theme.colors.textFaint} /><Text style={styles.stateText}>No worker routes found. Everything is clean.</Text></View>
+          ) : (
+            <View style={styles.routeList}>
+              {routes.data!.routes!.map((r, i) => (
+                <FadeIn key={r.id} delay={i * 45}>
+                  <View style={styles.routeRow}>
+                    <View style={styles.routeInfo}>
+                      <Text style={styles.routePattern} numberOfLines={1}>{r.pattern}</Text>
+                      <Text style={styles.routeScript} numberOfLines={1}>{r.script} · {r.zoneName ?? r.zoneId}</Text>
+                    </View>
+                    <Pressable onPress={() => removeRoute(r.id, r.zoneId ?? "", r.pattern)} disabled={deleteRoute.isPending} style={({ pressed }) => [styles.routeDelete, pressed && styles.pressed]}>
+                      {deleteRoute.isPending ? <ActivityIndicator size="small" color={theme.colors.danger} /> : <Trash2 size={13} color={theme.colors.danger} />}
+                    </Pressable>
+                  </View>
+                </FadeIn>
+              ))}
+            </View>
           )}
         </View>
 
@@ -487,4 +537,12 @@ const styles = StyleSheet.create({
   docBtnPressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
   docBtnText: { color: theme.colors.bg, fontWeight: "800", fontSize: 14 },
   footer: { color: theme.colors.textFaint, fontSize: 11, textAlign: "center", marginTop: theme.spacing(4), fontFamily: theme.font.mono },
+  stateCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(5), gap: theme.spacing(2), alignItems: "center" },
+  stateText: { color: theme.colors.textDim, fontSize: 13, textAlign: "center" },
+  routeList: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, overflow: "hidden" },
+  routeRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(3), paddingHorizontal: theme.spacing(4), paddingVertical: theme.spacing(3), borderBottomWidth: 1, borderBottomColor: theme.colors.border },
+  routeInfo: { flex: 1, gap: 2 },
+  routePattern: { color: theme.colors.text, fontSize: 13, fontFamily: theme.font.mono },
+  routeScript: { color: theme.colors.textDim, fontSize: 11, fontFamily: theme.font.mono },
+  routeDelete: { width: 32, height: 32, borderRadius: theme.radius.sm, backgroundColor: theme.colors.surfaceAlt, borderWidth: 1, borderColor: theme.colors.border, alignItems: "center", justifyContent: "center" },
 });

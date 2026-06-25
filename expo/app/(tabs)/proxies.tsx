@@ -29,6 +29,7 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import OfflineCard from "@/components/OfflineCard";
 import PressableScale from "@/components/PressableScale";
 import PulseDot from "@/components/PulseDot";
 import { theme } from "@/constants/theme";
@@ -85,16 +86,22 @@ function analyseTarget(targetUrl: string): string {
 function ProxyCard({ proxy, authHeader }: { proxy: Proxy; authHeader?: string }) {
   const update = useUpdateProxy(authHeader);
   const removeProxy = useDeleteProxy(authHeader);
-  const { data: zones, isLoading: zonesLoading } = useCloudflareZones(authHeader);
+  const { data: zonesResult, isLoading: zonesLoading } = useCloudflareZones(authHeader);
   const allocate = useAllocateProxyDomain(authHeader);
 
   const [showEdit, setShowEdit] = useState(false);
   const [showInject, setShowInject] = useState(false);
+  const [showDomain, setShowDomain] = useState(false);
   const [editName, setEditName] = useState(proxy.name);
   const [editTarget, setEditTarget] = useState(proxy.targetUrl);
   const [injectJs, setInjectJs] = useState(proxy.injectJs ?? "");
   const [domainCopied, setDomainCopied] = useState(false);
   const [urlCopied, setUrlCopied] = useState(false);
+  const [selectedZoneId, setSelectedZoneId] = useState<string>("");
+  const [hostname, setHostname] = useState("");
+  const [domainError, setDomainError] = useState<string | null>(null);
+
+  const zones = zonesResult?.configured ? (zonesResult?.zones ?? []) : [];
 
   const url = proxyUrl(proxy.slug);
   const domainUrl = proxy.proxyDomain ? `https://${proxy.proxyDomain}` : "";
@@ -119,6 +126,20 @@ function ProxyCard({ proxy, authHeader }: { proxy: Proxy; authHeader?: string })
   const autoAnalyse = () => {
     const snippet = analyseTarget(proxy.targetUrl);
     setInjectJs(snippet);
+  };
+
+  const selectedZone = useMemo(() => zones.find((z) => z.id === selectedZoneId), [zones, selectedZoneId]);
+
+  const allocateDomain = () => {
+    const zoneId = selectedZoneId;
+    const h = hostname.trim().toLowerCase();
+    if (!zoneId) { setDomainError("Select a Cloudflare zone."); return; }
+    if (!h || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(h)) { setDomainError("Enter a valid hostname."); return; }
+    setDomainError(null);
+    allocate.mutate(
+      { proxyId: proxy.id, zoneId, hostname: h },
+      { onSuccess: () => setShowDomain(false) },
+    );
   };
 
   const remove = () => {
@@ -176,6 +197,38 @@ function ProxyCard({ proxy, authHeader }: { proxy: Proxy; authHeader?: string })
         </Pressable>
       ) : null}
 
+      {/* Domain allocation panel */}
+      {showDomain && (
+        <View style={styles.domainPanel}>
+          <Text style={styles.fieldLabel}>CLOUDFLARE ZONE</Text>
+          {zonesLoading ? (
+            <ActivityIndicator color={theme.colors.accent} />
+          ) : zones.length === 0 ? (
+            <Text style={styles.domainHint}>No active zones found. Add Cloudflare credentials in Settings.</Text>
+          ) : (
+            <View style={styles.zoneList}>
+              {zones.map((z) => (
+                <Pressable key={z.id} onPress={() => { setSelectedZoneId(z.id); setHostname(`${proxy.slug}.${z.name}`); }} style={({ pressed }) => [styles.zoneChip, selectedZoneId === z.id && styles.zoneChipActive, pressed && styles.pressed]}>
+                  <Globe size={11} color={selectedZoneId === z.id ? theme.colors.accent : theme.colors.textFaint} />
+                  <Text style={[styles.zoneChipText, selectedZoneId === z.id && styles.zoneChipTextActive]} numberOfLines={1}>{z.name}</Text>
+                </Pressable>
+              ))}
+            </View>
+          )}
+          {selectedZone ? (
+            <>
+              <Text style={styles.fieldLabel}>HOSTNAME</Text>
+              <TextInput value={hostname} onChangeText={setHostname} style={styles.fieldInput} placeholder={`${proxy.slug}.${selectedZone.name}`} placeholderTextColor={theme.colors.textFaint} autoCapitalize="none" autoCorrect={false} />
+            </>
+          ) : null}
+          {domainError ? <Text style={styles.formError}>{domainError}</Text> : null}
+          <Pressable onPress={allocateDomain} disabled={allocate.isPending || zones.length === 0} style={({ pressed }) => [styles.saveBtn, pressed && styles.pressed]}>
+            {allocate.isPending ? <ActivityIndicator size="small" color={theme.colors.bg} /> : <Globe size={13} color={theme.colors.bg} />}
+            <Text style={styles.saveBtnText}>Allocate domain</Text>
+          </Pressable>
+        </View>
+      )}
+
       {/* Edit panel */}
       {showEdit && (
         <View style={styles.editPanel}>
@@ -231,6 +284,10 @@ function ProxyCard({ proxy, authHeader }: { proxy: Proxy; authHeader?: string })
           <Bug size={13} color={proxy.interceptEnabled ? theme.colors.warn : theme.colors.textFaint} />
           <Text style={[styles.actionText, { color: proxy.interceptEnabled ? theme.colors.warn : theme.colors.textDim }]}>{proxy.interceptEnabled ? "Capturing" : "Intercept"}</Text>
         </Pressable>
+        <Pressable onPress={() => { setShowDomain(v => !v); setSelectedZoneId(""); setHostname(""); setDomainError(null); }} style={({ pressed }) => [styles.actionBtn, pressed && styles.pressed, showDomain && styles.actionBtnActive]}>
+          <Globe size={13} color={proxy.proxyDomain ? theme.colors.ok : showDomain ? theme.colors.accent : theme.colors.textFaint} />
+          <Text style={[styles.actionText, { color: proxy.proxyDomain ? theme.colors.ok : showDomain ? theme.colors.accent : theme.colors.textDim }]}>{proxy.proxyDomain ? "Domain" : "Domain"}</Text>
+        </Pressable>
         <Pressable onPress={remove} disabled={removeProxy.isPending} style={({ pressed }) => [styles.actionBtn, pressed && styles.pressed]}>
           <Trash2 size={13} color={theme.colors.danger} />
           <Text style={[styles.actionText, { color: theme.colors.danger }]}>Remove</Text>
@@ -245,7 +302,7 @@ function ProxyCard({ proxy, authHeader }: { proxy: Proxy; authHeader?: string })
 export default function ProxiesScreen() {
   const insets = useSafeAreaInsets();
   const ah = useApiKey();
-  const { data, isLoading, isError, error } = useProxies();
+  const { data, isLoading, isError, error, refetch } = useProxies();
   const createProxy = useCreateProxy(ah);
 
   const [name, setName] = useState("");
@@ -317,9 +374,7 @@ export default function ProxiesScreen() {
 
           {/* Proxy list */}
           {isError ? (
-            <View style={styles.stateCard}>
-              <Text style={styles.errorText}>{error?.message ?? "Could not load proxy targets."}</Text>
-            </View>
+            <OfflineCard message={error?.message ?? "Could not load proxy targets."} onRetry={() => refetch()} />
           ) : isLoading ? (
             <View style={styles.stateCard}>
               <ActivityIndicator color={theme.colors.accent} />
@@ -422,7 +477,15 @@ const styles = StyleSheet.create({
   // Actions
   actions: { flexDirection: "row", gap: theme.spacing(2) },
   actionBtn: { flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(2), backgroundColor: theme.colors.surfaceAlt, borderRadius: theme.radius.sm, paddingVertical: theme.spacing(2.5) },
+  actionBtnActive: { backgroundColor: "rgba(184,255,60,0.12)", borderWidth: 1, borderColor: theme.colors.accent },
   actionText: { fontSize: 12, fontWeight: "700" },
+  domainPanel: { backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3), gap: theme.spacing(2) },
+  domainHint: { color: theme.colors.textDim, fontSize: 12, fontFamily: theme.font.mono },
+  zoneList: { flexDirection: "row", flexWrap: "wrap", gap: theme.spacing(2) },
+  zoneChip: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5), backgroundColor: theme.colors.surface, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2) },
+  zoneChipActive: { backgroundColor: "rgba(184,255,60,0.12)", borderColor: theme.colors.accent },
+  zoneChipText: { color: theme.colors.textDim, fontSize: 12, fontWeight: "600", fontFamily: theme.font.mono },
+  zoneChipTextActive: { color: theme.colors.accent },
   actionBtnSm: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(1.5), backgroundColor: theme.colors.surfaceAlt, borderRadius: theme.radius.sm, paddingHorizontal: theme.spacing(2.5), paddingVertical: theme.spacing(2) },
   actionBtnSmWarn: { borderWidth: 1, borderColor: theme.colors.warn },
   actionSmText: { fontSize: 10, fontWeight: "700" },

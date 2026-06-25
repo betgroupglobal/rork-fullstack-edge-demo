@@ -1,10 +1,12 @@
 import { LinearGradient } from "expo-linear-gradient";
+import { router } from "expo-router";
 import {
   Activity,
   AlertTriangle,
   Clock,
   Database,
   Gauge,
+  Package,
   Radio,
   RefreshCw,
   ShieldCheck,
@@ -24,6 +26,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import AnimatedCounter from "@/components/AnimatedCounter";
 import FadeIn from "@/components/FadeIn";
+import OfflineCard from "@/components/OfflineCard";
 import PressableScale from "@/components/PressableScale";
 import PulseDot from "@/components/PulseDot";
 import { theme } from "@/constants/theme";
@@ -157,12 +160,13 @@ export default function DashboardScreen() {
             </PressableScale>
           </View>
           {health.isError ? (
-            <Text style={styles.errorText}>{health.error?.message ?? "Could not reach the gateway."}</Text>
+            <OfflineCard message={health.error?.message ?? "Could not reach the gateway."} onRetry={() => health.refetch()} />
           ) : (
-            <View style={styles.healthyRow}>
+            <Pressable onPress={() => router.push("/items")} style={({ pressed }) => [styles.healthyRow, pressed && styles.pressed]}>
               <ShieldCheck size={14} color={theme.colors.ok} />
-              <Text style={styles.healthyText}>Healthy · {health.data?.itemCount ?? 0} items stored · auto-refresh</Text>
-            </View>
+              <Package size={14} color={theme.colors.accent} />
+              <Text style={styles.healthyText}>{health.data?.itemCount ?? 0} items stored · manage →</Text>
+            </Pressable>
           )}
         </View>
 
@@ -213,9 +217,7 @@ export default function DashboardScreen() {
         </View>
 
         {traffic.isError ? (
-          <View style={styles.feedState}>
-            <Text style={styles.errorText}>{traffic.error?.message ?? "Could not load traffic."}</Text>
-          </View>
+          <OfflineCard message={traffic.error?.message ?? "Could not load traffic."} onRetry={() => traffic.refetch()} />
         ) : traffic.isLoading ? (
           <View style={styles.feedState}>
             <ActivityIndicator color={theme.colors.accent} />
@@ -257,6 +259,7 @@ const styles = StyleSheet.create({
   errorText: { color: theme.colors.danger, fontSize: 13, fontFamily: theme.font.mono },
   healthyRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2) },
   healthyText: { color: theme.colors.textDim, fontSize: 12, flexShrink: 1 },
+  pressed: { opacity: 0.55 },
   statGrid: { flexDirection: "row", flexWrap: "wrap", gap: theme.spacing(2) },
   statCardWrap: { flexGrow: 1, flexBasis: "46%" },
   statCard: { backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3.5), gap: theme.spacing(1.5) },
