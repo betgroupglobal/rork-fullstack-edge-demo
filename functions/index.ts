@@ -2,16 +2,21 @@
 // ItemsStore Durable Object. It handles CORS, security headers, per-IP rate
 // limiting (in the DO), and real edge caching for GET reads via the Cache API.
 
-import { DurableObjectNamespace } from "cloudflare:workers";
-
-/** Build marker — bumped to force a fresh Worker provisioning on deploy. */
-const GATEWAY_BUILD = "2026-06-25-auth-fallback";
+/**
+ * Build marker — bumped to force a fresh Worker provisioning on deploy.
+ *
+ * `DurableObjectNamespace` is a GLOBAL type from the Workers runtime, not a
+ * runtime export of `cloudflare:workers`. Importing it as a value made the
+ * Worker throw at module load ("does not provide an export named
+ * 'DurableObjectNamespace'"), so the script never booted and every route
+ * returned 503 `route unavailable`. It is only used as a type below, so no
+ * import is required — mirroring how items-store.ts uses `DurableObjectState`.
+ */
+const GATEWAY_BUILD = "2026-06-25-clean-wrangler-reprovision";
 
 export { ItemsStore } from "./items-store";
 
 const STORE_ID = "global";
-
-void GATEWAY_BUILD;
 
 function doFetch(env: Env, req: Request): Promise<Response> {
   const id = env.DO.idFromName(STORE_ID);
@@ -2023,6 +2028,7 @@ export default {
         Response.json({
           ok: true,
           gateway: "edge-gateway-dashboard",
+          build: GATEWAY_BUILD,
           timestamp: new Date().toISOString(),
         }),
         corsOrigin,
@@ -2233,25 +2239,11 @@ export default {
     const isConfigRoute = path === "/api/config";
     const isAuthRoute = path.startsWith("/api/auth/");
 
-    // Authentication is resilient by design. Prefer the local Postgres-backed
-    // auth server (auth-server.js on :33337) when it is reachable and healthy,
-    // but fall back to the Durable Object's self-contained SQLite auth when it
-    // isn't — e.g. DATABASE_URL is unset, the Node process is down, or this is
-    // running as a pure Worker. This guarantees sign-in works in every topology.
-    if (isAuthRoute) {
-      try {
-        const authUrl = `http://127.0.0.1:33337${path}${url.search}`;
-        const authRes = await fetch(new Request(authUrl, request.clone()));
-        // Trust only non-5xx responses. A 5xx (or a thrown fetch) means the auth
-        // server isn't available, so fall through to the DO implementation.
-        if (authRes.status < 500) {
-          return decorate(authRes, corsOrigin);
-        }
-      } catch {
-        // Auth server unreachable — fall through to the Durable Object below.
-      }
-      // Fall through: dispatch() routes /api/auth/* to the DO's built-in auth.
-    }
+    // Authentication runs entirely inside the Durable Object, which owns a
+    // durable SQLite store for users and sessions (see items-store.ts). On
+    // Rork's managed Cloudflare hosting the DO is the single source of truth,
+    // so /api/auth/* is dispatched straight to it below — there is no external
+    // auth process to reach (a Worker cannot connect to localhost).
 
     if (
       path !== "/health" &&
