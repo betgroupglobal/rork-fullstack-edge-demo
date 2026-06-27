@@ -1,0 +1,55 @@
+# =============================================================================
+# Edge Gateway self-hosted proxy config template (frp/Pangolin-style).
+# Copy to config.toml and fill in your values.
+# =============================================================================
+
+# ── Server bind ─────────────────────────────────────────────────────────────
+[server]
+bindAddr = "0.0.0.0"
+bindPort = 7000
+
+# Custom paths (isolated from Cloudflare vendor defaults)
+logFile = "/data/logs/proxy-server.log"
+logLevel = "info"
+logMaxDays = 7
+
+# ── Proxy tunnels ───────────────────────────────────────────────────────────
+# Each [[proxies]] block defines a reverse-proxy tunnel.
+# The Edge Gateway routes traffic through these to your targets.
+
+# Example: tunnel a local dev server through the proxy
+# [[proxies]]
+# name = "dev-api"
+# type = "tcp"
+# localIP = "127.0.0.1"
+# localPort = 3000
+# remotePort = 6000
+
+# Example: HTTP reverse proxy with custom domain
+# [[proxies]]
+# name = "web-app"
+# type = "http"
+# localIP = "127.0.0.1"
+# localPort = 8080
+# customDomains = ["app.yourdomain.com"]
+
+# ── Health check ────────────────────────────────────────────────────────────
+[health]
+path = "/health"
+intervalSeconds = 30
+timeoutSeconds = 5
+
+# ── Edge Gateway integration ────────────────────────────────────────────────
+# The Edge Gateway server.js runs alongside the proxy.
+# Point the gateway's API at the proxy's health endpoint.
+[gateway]
+apiPort = 8787
+healthPath = "/health"
+corsOrigins = ["*"]
+
+# ── Auth ────────────────────────────────────────────────────────────────────
+[auth]
+# API key for write operations on the gateway
+apiKey = "${API_KEY:-}"
+# Token for proxy administration
+token = "${PROXY_TOKEN:-}"

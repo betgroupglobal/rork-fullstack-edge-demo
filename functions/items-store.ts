@@ -1012,6 +1012,7 @@ export class ItemsStore extends DurableObject<unknown, unknown> {
   }
 
   override async fetch(request: Request): Promise<Response> {
+    try {
     const url = new URL(request.url);
     const path = url.pathname;
     const method = request.method;
@@ -1631,6 +1632,10 @@ export class ItemsStore extends DurableObject<unknown, unknown> {
     }
 
     return Response.json({ success: false, error: "not found" }, { status: 404 });
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      return Response.json({ success: false, error: message }, { status: 500 });
+    }
   }
 
   private jsonCached(body: string, cache: "HIT" | "MISS"): Response {

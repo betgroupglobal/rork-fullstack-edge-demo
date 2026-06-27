@@ -1,8 +1,10 @@
 # Schema: https://railway.app/railway.schema.json
+# Custom build path: isolates from Cloudflare vendor defaults.
 
 [build]
 builder = "DOCKERFILE"
 dockerfilePath = "functions/Dockerfile"
+buildContext = ".."
 
 [deploy]
 restartPolicyType = "ON_FAILURE"

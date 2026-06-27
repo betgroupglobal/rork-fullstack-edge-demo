@@ -28,6 +28,8 @@ Environment variables:
   GATEWAY_BASE_URL     Optional gateway API base URL (e.g. https://gateway.example.com).
   GATEWAY_API_KEY      Optional API key for the gateway; used when uploading results.
   PROXY_ID             Optional proxy ID on the gateway to associate with the result.
+  PROXY_BUILD_PATH     Custom build path for self-hosted proxy pipeline output.
+  PROXY_ENDPOINT       Self-hosted proxy endpoint URL (Pangolin/frp/NetBird).
 `;
 
 type CapturedLoginForm = {

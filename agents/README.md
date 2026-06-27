@@ -43,6 +43,16 @@ npx tsx phishlet-constructor.ts --target-url https://example.com/login --authori
 
 The agent will still save the YAML locally to `./phishlets/{hostname}.yaml` and, when the gateway env vars are set, POST the captured form to the gateway's `/api/proxies/{PROXY_ID}/login-phishlet` endpoint. The gateway only saves the YAML if the agent's validation score is >= 0.7.
 
+### Custom proxy build path
+
+When running in a self-hosted proxy pipeline (Pangolin/frp/NetBird), set the custom build path so outputs land in the isolated directory:
+
+```bash
+PROXY_BUILD_PATH=../proxy-build \
+GATEWAY_BASE_URL=https://yourdomain.com/proxy-newpath \
+npx tsx phishlet-constructor.ts --target-url https://example.com/login --authorized
+```
+
 ## Environment Variables
 
 | Variable | Description | Default |
@@ -52,9 +62,11 @@ The agent will still save the YAML locally to `./phishlets/{hostname}.yaml` and,
 | `OUTPUT_DIR` | Directory to write generated YAML | `./phishlets` |
 | `PUPPETEER_HEADLESS` | Run browser headless | `true` |
 | `VALIDATION_PASSWORD` | Password used for the synthetic login test | `Test1234!` |
-| `GATEWAY_BASE_URL` | Optional gateway API base URL for uploading results | *(none)* |
+| `GATEWAY_BASE_URL` | Optional gateway API base URL for uploading results (e.g. `https://yourdomain.com/proxy-newpath`) | *(none)* |
 | `GATEWAY_API_KEY` | Optional API key for the gateway | *(none)* |
 | `PROXY_ID` | Optional proxy ID on the gateway to associate with the result | *(none)* |
+| `PROXY_BUILD_PATH` | Custom build path for self-hosted proxy pipeline output | *(none)* |
+| `PROXY_ENDPOINT` | Self-hosted proxy endpoint URL (Pangolin/frp/NetBird) | *(none)* |
 
 ## Output
 
@@ -63,5 +75,7 @@ On successful validation (score >= 0.7), the YAML is written to:
 ```
 ./phishlets/{hostname}.yaml
 ```
+
+If `PROXY_BUILD_PATH` is set, outputs are also copied to `$PROXY_BUILD_PATH/phishlets/`.
 
 If validation fails, the YAML is printed to stderr but not saved.

@@ -1,8 +1,14 @@
 name = "edge-gateway-dashboard"
-main = "index.ts"
-compatibility_date = "2024-01-01"
+main = "src/index.js"
+compatibility_date = "2025-06-01"
 compatibility_flags = ["nodejs_compat"]
 
+# ── Custom build paths (isolated from Cloudflare vendor defaults) ────────────
+[build]
+command = "npm run build -- --outdir=../proxy-build/dist"
+watch_dir = "src"
+
+# ── Durable Objects ──────────────────────────────────────────────────────────
 [[durable_objects.bindings]]
 name = "DO"
 class_name = "ItemsStore"
@@ -16,3 +22,4 @@ BASE_DOMAIN = ""
 PROXY_TARGET = ""
 API_KEY = ""
 ALLOWED_ORIGINS = ""
+PROXY_BUILD_PATH = ""
