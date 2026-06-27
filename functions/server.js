@@ -121,7 +121,11 @@ function parsePath(pathname) {
 
 // ── Request handler ─────────────────────────────────────────────────────────
 async function handleRequest(req, res) {
+  // Stash metadata on res so `json()` auto-logs every response
+  res._startTime = Date.now();
+  res._method = req.method;
   const url = new URL(req.url, `http://localhost:${PORT}`);
+  res._path = url.pathname;
   const pathname = url.pathname;
   const method = req.method.toUpperCase();
   const cors = corsHeaders(req);
@@ -137,7 +141,7 @@ async function handleRequest(req, res) {
 
   // Health check — always available, no auth required
   if (route.type === "health" || route.type === "ping") {
-    return json(res, 200, {
+    const body = {
       status: "ok",
       timestamp: new Date().toISOString(),
       uptime: Math.round((Date.now() - startedAt) / 1000),
@@ -154,7 +158,8 @@ async function handleRequest(req, res) {
         rateLimit: null,
         rateRemaining: null,
       },
-    }, cors);
+    };
+    return json(res, 200, body, cors);
   }
 
   // Items collection

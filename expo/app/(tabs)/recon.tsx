@@ -22,294 +22,10 @@ import { theme } from "@/constants/theme";
 import { useApiKey } from "@/hooks/useApiKey";
 import { useGenerateLoginPhishlet, useGeneratePhishlet, useIteratePhishlet, useProxies } from "@/hooks/useGateway";
 import { getBaseUrl, proxyUrl } from "@/lib/api";
-import type { CritiqueEntry } from "@/lib/api";
-
-// ── Focused login-form probe used by the PhishletGen-Automator mode ──
-const LOGIN_PROBE_SCRIPT = `
-(function() {
-  'use strict';
-  function visibleArea(el) {
-    var rect = el.getBoundingClientRect();
-    return Math.max(0, rect.width) * Math.max(0, rect.height);
-  }
-  function isHttps(action) {
-    try { return new URL(action, location.href).protocol === 'https:'; } catch(e) { return false; }
-  }
-  function hasPassword(form) { return !!form.querySelector('input[type="password"]'); }
-  function findBestLoginForm() {
-    var forms = Array.from(document.querySelectorAll('form')).filter(hasPassword);
-    if (forms.length === 0) return null;
-    var scored = forms.map(function(f) {
-      var action = f.action || location.href;
-      return { form: f, https: isHttps(action) ? 1 : 0, area: visibleArea(f), action: action };
-    });
-    scored.sort(function(a, b) {
-      if (b.https !== a.https) return b.https - a.https;
-      return b.area - a.area;
-    });
-    return scored[0].form;
-  }
-  function getLoginPath(form) {
-    try {
-      var action = form.action || location.href;
-      return new URL(action, location.href).pathname || '/';
-    } catch(e) { return '/'; }
-  }
-  function getSubmitSelector(form) {
-    if (form.id) return 'form#' + form.id;
-    if (form.name) return 'form[name="' + form.name + '"]';
-    if (form.className) {
-      var cls = form.className.split(/\\s+/).filter(Boolean)[0];
-      if (cls) return 'form.' + cls + ':has(> input[type="password"])';
-    }
-    return 'form:has(> input[type="password"])';
-  }
-  function getPasswordInput(form) { return form.querySelector('input[type="password"]'); }
-  function getUsernameInput(form, passwordInput) {
-    var inputs = Array.from(form.querySelectorAll('input'));
-    var pwIndex = passwordInput ? inputs.indexOf(passwordInput) : -1;
-    for (var i = pwIndex - 1; i >= 0; i--) {
-      var t = (inputs[i].type || 'text').toLowerCase();
-      if (t === 'text' || t === 'email' || t === 'tel') return inputs[i];
-    }
-    for (var j = 0; j < inputs.length; j++) {
-      var t2 = (inputs[j].type || 'text').toLowerCase();
-      if (t2 === 'text' || t2 === 'email' || t2 === 'tel') return inputs[j];
-    }
-    return null;
-  }
-  function extractLoginForm() {
-    var form = findBestLoginForm();
-    if (!form) return null;
-    var pw = getPasswordInput(form);
-    var user = getUsernameInput(form, pw);
-    var hidden = Array.from(form.querySelectorAll('input[type="hidden"]')).map(function(h) {
-      return { name: h.name || h.id || '', value: h.value || '' };
-    }).filter(function(h) { return h.name; });
-    return {
-      domain: location.hostname,
-      loginPath: getLoginPath(form),
-      submitSelector: getSubmitSelector(form),
-      usernameField: user ? (user.name || user.id || 'username') : 'username',
-      passwordField: pw ? (pw.name || pw.id || 'password') : 'password',
-      hiddenInputs: hidden
-    };
-  }
-  function send() {
-    var data = extractLoginForm();
-    if (data && window.ReactNativeWebView) {
-      window.ReactNativeWebView.postMessage(JSON.stringify({ loginForm: data }));
-    }
-  }
-  send();
-  setTimeout(send, 1000);
-  setTimeout(send, 2500);
-})();
-`;
-
-// ── Injected capture script — enhanced probe for modern auth flows ──
-const CAPTURE_SCRIPT = `
-(function() {
-  'use strict';
-  var PH = window.__phishletCapture || (window.__phishletCapture = {
-    domains: [], urls: [], cookies: [], formFields: [], hiddenInputs: [],
-    csrfFields: [], authLinks: [], apiEndpoints: [], scripts: [], forms: [],
-    redirects: [], pageTitle: '', formAction: '', formMethod: '',
-  });
-
-  function findBestForm() {
-    var forms = Array.from(document.querySelectorAll('form'));
-    for (var i = 0; i < forms.length; i++) {
-      if (forms[i].querySelector('input[type=password]')) return forms[i];
-    }
-    for (var j = 0; j < forms.length; j++) {
-      var inputs = forms[j].querySelectorAll('input');
-      for (var k = 0; k < inputs.length; k++) {
-        var n = (inputs[k].name || inputs[k].id || '').toLowerCase();
-        if (/user|email|login|username|account|identifier/.test(n)) return forms[j];
-      }
-    }
-    return forms[0] || null;
-  }
-
-  function recordUnique(key, value) {
-    if (!PH._seen) PH._seen = {};
-    if (!PH._seen[key]) PH._seen[key] = {};
-    var s = typeof value === 'string' ? value : JSON.stringify(value);
-    if (PH._seen[key][s]) return false;
-    PH._seen[key][s] = true;
-    if (!Array.isArray(PH[key])) PH[key] = [];
-    PH[key].push(value);
-    return true;
-  }
-
-  function absoluteUrl(href) {
-    try { return new URL(href, location.href).href; } catch(e) { return ''; }
-  }
-
-  function isAuthUrl(href) {
-    return /login|signin|sign-in|auth|register|signup|account|oauth|sso|saml|openid|password|forgot|token|/i.test(href);
-  }
-
-  function isApiUrl(href) {
-    return /\\/(api|graphql|oauth|token|auth|session|sessions|saml|login)\\b|\\.(api|graphql)$/i.test(href);
-  }
-
-  function collect() {
-    var payload = {};
-    payload.pageTitle = document.title || '';
-    var bestForm = findBestForm();
-    if (bestForm) {
-      payload.formAction = bestForm.action || location.href;
-      payload.formMethod = (bestForm.method || 'get').toLowerCase();
-    }
-
-    var allInputs = Array.from(document.querySelectorAll('input, select, textarea'));
-    var seen = {};
-    var fields = [];
-    var hidden = [];
-    var csrf = [];
-    allInputs.forEach(function(el) {
-      var key = el.name || el.id || el.placeholder || el.type;
-      if (!key || seen[key]) return;
-      seen[key] = true;
-      var type = (el.type || 'text').toLowerCase();
-      var entry = {
-        name: el.name || '',
-        type: type,
-        id: el.id || '',
-        placeholder: el.placeholder || '',
-        required: !!el.required,
-        autocomplete: el.autocomplete || '',
-      };
-      fields.push(entry);
-      if (type === 'hidden') {
-        hidden.push({ name: el.name || '', value: el.value || '', id: el.id || '' });
-      }
-      var keyLower = key.toLowerCase();
-      if (/csrf|xsrf|token|nonce|state|_requesttoken|__viewstate/.test(keyLower)) {
-        csrf.push({ name: el.name || '', value: el.value || '', id: el.id || '' });
-      }
-    });
-    payload.formFields = fields;
-    payload.hiddenInputs = hidden;
-    payload.csrfFields = csrf;
-
-    var rawCookies = document.cookie ? document.cookie.split(';') : [];
-    var cookieNames = [];
-    rawCookies.forEach(function(c) { var name = c.trim().split('=')[0].trim(); if (name) cookieNames.push(name); });
-    payload.cookies = cookieNames;
-    payload.allCookies = cookieNames;
-
-    payload.urls = [location.href];
-    payload.authLinks = [];
-    Array.from(document.querySelectorAll('a[href], button[data-href], [data-oauth-url]')).forEach(function(a) {
-      var h = a.getAttribute('href') || a.getAttribute('data-href') || a.getAttribute('data-oauth-url') || '';
-      if (!h) return;
-      var abs = absoluteUrl(h);
-      if (!abs) return;
-      var text = (a.textContent || '').trim().slice(0, 60);
-      if (isAuthUrl(h)) {
-        payload.urls.push(abs);
-        payload.authLinks.push({ href: abs, text: text });
-      } else if (isApiUrl(h)) {
-        payload.apiEndpoints.push(abs);
-      }
-    });
-
-    payload.domains = [location.hostname];
-    payload.scripts = [];
-    Array.from(document.querySelectorAll('a[href], img[src], script[src], link[href], iframe[src]')).forEach(function(el) {
-      var attr = el.getAttribute('href') || el.getAttribute('src') || '';
-      var m = attr.match(/^https?:\\/\\/([^/?#]+)/i);
-      if (m && m[1] !== location.hostname) {
-        payload.domains.push(m[1]);
-        if (el.tagName === 'SCRIPT' && attr) payload.scripts.push(m[1]);
-      }
-    });
-
-    payload.forms = Array.from(document.querySelectorAll('form')).map(function(f) {
-      return {
-        action: absoluteUrl(f.action || location.href) || location.href,
-        method: (f.method || 'get').toLowerCase(),
-        id: f.id || '',
-        name: f.name || '',
-      };
-    });
-
-    payload.redirects = [location.href];
-
-    ['urls','cookies','formFields','hiddenInputs','csrfFields','authLinks','apiEndpoints','scripts','forms','redirects','domains'].forEach(function(k) {
-      var incoming = payload[k] || [];
-      incoming.forEach(function(v) { recordUnique(k, v); });
-    });
-
-    if (payload.pageTitle) PH.pageTitle = payload.pageTitle;
-    if (payload.formAction) PH.formAction = payload.formAction;
-    if (payload.formMethod) PH.formMethod = payload.formMethod;
-
-    window.ReactNativeWebView && window.ReactNativeWebView.postMessage(JSON.stringify({
-      urls: PH.urls, cookies: PH.cookies, formFields: PH.formFields,
-      hiddenInputs: PH.hiddenInputs, csrfFields: PH.csrfFields,
-      authLinks: PH.authLinks, apiEndpoints: PH.apiEndpoints,
-      scripts: PH.scripts, forms: PH.forms,
-      redirects: PH.redirects, domains: PH.domains,
-      pageTitle: PH.pageTitle, formAction: PH.formAction, formMethod: PH.formMethod
-    }));
-  }
-
-  // Hook XHR / fetch to capture API endpoints.
-  try {
-    var _fetch = window.fetch;
-    window.fetch = function() {
-      var arg = arguments[0];
-      var url = typeof arg === 'string' ? arg : (arg && arg.url) || '';
-      if (url && isApiUrl(url)) recordUnique('apiEndpoints', url);
-      return _fetch.apply(this, arguments);
-    };
-  } catch(e) {}
-  try {
-    var _XHR = window.XMLHttpRequest;
-    var HookedXHR = function() {
-      var xhr = new _XHR();
-      var _open = xhr.open;
-      xhr.open = function(method, url) {
-        if (url && isApiUrl(url)) recordUnique('apiEndpoints', url);
-        return _open.apply(xhr, arguments);
-      };
-      return xhr;
-    };
-    HookedXHR.prototype = _XHR.prototype;
-    window.XMLHttpRequest = HookedXHR;
-  } catch(e) {}
-
-  // Observe dynamic DOM changes (SPA forms, OAuth popups, etc).
-  try {
-    var observer = new MutationObserver(function() { collect(); });
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-  } catch(e) {}
-
-  (function(){
-    var _ps = history.pushState, _rs = history.replaceState;
-    history.pushState = function() { _ps.apply(this, arguments); setTimeout(collect, 800); };
-    history.replaceState = function() { _rs.apply(this, arguments); setTimeout(collect, 800); };
-    window.addEventListener('popstate', function() { setTimeout(collect, 800); });
-  })();
-
-  document.addEventListener('submit', function(e) {
-    var f = e.target;
-    if (f && f.tagName === 'FORM') { PH.formAction = f.action || location.href; PH.formMethod = (f.method || 'get').toLowerCase(); }
-    setTimeout(collect, 300);
-  }, true);
-  document.addEventListener('click', function(e) {
-    var el = e.target;
-    if (el && (el.tagName === 'BUTTON' || el.type === 'submit')) setTimeout(collect, 500);
-  });
-  setTimeout(collect, 800);
-  setTimeout(collect, 2500);
-  setTimeout(collect, 5000);
-})();
-`;
+import type { CritiqueEntry } from "@/lib/api/types";
+import { CAPTURE_SCRIPT } from "@/lib/scripts/capture";
+import { LOGIN_PROBE_SCRIPT } from "@/lib/scripts/login-probe";
+import { mergeCaptureMessage, mapCapturedData } from "@/lib/scripts/mapCapturedData";
 
 // ── Pipeline stage enum ──
 type Stage = "idle" | "scanning" | "generating" | "iterating" | "done";
@@ -424,35 +140,11 @@ npx tsx agents/phishlet-constructor.ts \\
   // ── WebView message handler ──
   const onMessage = useCallback((event: { nativeEvent: { data?: string | Record<string, unknown> } }) => {
     try {
-      // React Native WebView may auto-parse JSON strings into objects before
-      // delivering to onMessage, so we handle both raw strings and objects.
       const raw = event.nativeEvent.data;
       if (raw == null) return;
       const data: Record<string, unknown> =
         typeof raw === "string" ? JSON.parse(raw) as Record<string, unknown> : raw;
-      setCaptured((prev) => {
-        const merged: Record<string, unknown> = { ...prev };
-        for (const key of [
-          "urls", "cookies", "formFields", "hiddenInputs", "csrfFields",
-          "authLinks", "apiEndpoints", "scripts", "forms", "redirects", "domains",
-        ]) {
-          const arr: unknown[] = Array.isArray(data[key]) ? data[key] as unknown[] : [];
-          const existing = (merged[key] as unknown[]) ?? [];
-          const seen = new Set(existing.map((v) => typeof v === "string" ? v : JSON.stringify(v)));
-          for (const item of arr) {
-            const s = typeof item === "string" ? item : JSON.stringify(item);
-            if (!seen.has(s)) { seen.add(s); existing.push(item); }
-          }
-          merged[key] = existing;
-        }
-        if (data.pageTitle) merged.pageTitle = String(data.pageTitle);
-        if (data.formAction) merged.formAction = String(data.formAction);
-        if (data.formMethod) merged.formMethod = String(data.formMethod);
-        if (data.loginForm && typeof data.loginForm === "object") {
-          merged.loginForm = data.loginForm as Record<string, unknown>;
-        }
-        return merged;
-      });
+      setCaptured((prev) => mergeCaptureMessage(prev, data));
     } catch { /* ignore */ }
   }, []);
 
@@ -465,22 +157,7 @@ npx tsx agents/phishlet-constructor.ts \\
   useEffect(() => {
     if (stage === "scanning" && hasCaptureData && !generate.isPending && !generated) {
       setStage("generating");
-      const cap = {
-        urls: (captured.urls as string[]) ?? [],
-        cookies: (captured.cookies as string[]) ?? [],
-        formFields: (captured.formFields as { name: string; type: string; id?: string; placeholder?: string; required?: boolean; autocomplete?: string }[]) ?? [],
-        redirects: (captured.redirects as string[]) ?? [],
-        domains: (captured.domains as string[]) ?? [],
-        pageTitle: captured.pageTitle as string | undefined,
-        formAction: captured.formAction as string | undefined,
-        formMethod: captured.formMethod as string | undefined,
-        hiddenInputs: (captured.hiddenInputs as { name: string; value: string; id?: string }[]) ?? [],
-        csrfFields: (captured.csrfFields as { name: string; value: string; id?: string }[]) ?? [],
-        authLinks: (captured.authLinks as { href: string; text: string }[]) ?? [],
-        apiEndpoints: (captured.apiEndpoints as string[]) ?? [],
-        scripts: (captured.scripts as string[]) ?? [],
-        forms: (captured.forms as { action: string; method: string; id?: string; name?: string }[]) ?? [],
-      };
+      const cap = mapCapturedData(captured);
       generate.mutate(
         { proxyId: selected!.id, input: { targetUrl: selected!.targetUrl, captured: cap } },
         { onSuccess: (data) => setGenerated(data.phishlet) },
@@ -492,22 +169,7 @@ npx tsx agents/phishlet-constructor.ts \\
   useEffect(() => {
     if (stage === "generating" && generated && !iterate.isPending && !refinedYaml) {
       setStage("iterating");
-      const cap = {
-        urls: (captured.urls as string[]) ?? [],
-        cookies: (captured.cookies as string[]) ?? [],
-        formFields: (captured.formFields as { name: string; type: string; id?: string; placeholder?: string; required?: boolean; autocomplete?: string }[]) ?? [],
-        redirects: (captured.redirects as string[]) ?? [],
-        domains: (captured.domains as string[]) ?? [],
-        pageTitle: captured.pageTitle as string | undefined,
-        formAction: captured.formAction as string | undefined,
-        formMethod: captured.formMethod as string | undefined,
-        hiddenInputs: (captured.hiddenInputs as { name: string; value: string; id?: string }[]) ?? [],
-        csrfFields: (captured.csrfFields as { name: string; value: string; id?: string }[]) ?? [],
-        authLinks: (captured.authLinks as { href: string; text: string }[]) ?? [],
-        apiEndpoints: (captured.apiEndpoints as string[]) ?? [],
-        scripts: (captured.scripts as string[]) ?? [],
-        forms: (captured.forms as { action: string; method: string; id?: string; name?: string }[]) ?? [],
-      };
+      const cap = mapCapturedData(captured);
       iterate.mutate(
         { proxyId: selected!.id, phishlet: generated, captured: cap },
         {
