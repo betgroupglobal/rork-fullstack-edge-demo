@@ -3,14 +3,17 @@
 import { getBaseUrl, safeFetch, readMeta, parse } from "./client";
 import type {
   HealthResult, ItemsResult, Item,
-  Proxy, CloudflareZone, ZonesResult,
+  Proxy,
   ReconInput, ReconResult, LoginPhishletInput,
-  WorkerRoute, WorkerRoutesResult,
   InterceptCapture,
   TrafficResult,
-  WorkerConfig,
+  RuntimeConfig,
   ReplayReport,
   IterateResult,
+  ProxyStatus,
+  ProxyTunnel,
+  TunnelListResult,
+  TunnelCreateInput,
 } from "./types";
 
 const BASE = () => getBaseUrl();
@@ -129,71 +132,103 @@ export function proxyUrl(slug: string): string {
   return `${BASE()}/proxy/${slug}`;
 }
 
-// ── Cloudflare zones & routes ────────────────────────────────────────────────
+// ── Proxy Tunnels (self-hosted Pangolin/frp/NetBird) ─────────────────────────
 
-export async function fetchCloudflareZones(authHeader?: string): Promise<ZonesResult> {
-  const headers: Record<string, string> = {};
-  if (authHeader) headers["Authorization"] = authHeader;
-  const response = await safeFetch(`${BASE()}/api/cloudflare/zones`, {
-    cache: "no-store",
-    headers,
-  });
-  const text = await response.text();
-  let zonesJson: { success?: boolean; configured?: boolean; data?: CloudflareZone[]; error?: string } = {};
-  if (text) {
-    try { zonesJson = JSON.parse(text); } catch { zonesJson = { success: false, error: "Invalid JSON response from gateway" }; }
-  }
-  if (!zonesJson.success) {
-    return { configured: zonesJson.configured ?? false, zones: [], error: zonesJson.error };
-  }
-  return { configured: true, zones: zonesJson.data ?? [] };
+export async function fetchProxyStatus(): Promise<ProxyStatus> {
+  const response = await safeFetch(`${BASE()}/api/proxy/status`, { cache: "no-store" });
+  const data = await parse<{ data: ProxyStatus }>(response);
+  return data.data;
 }
 
-export async function allocateProxyDomain(
-  input: { proxyId: number; zoneId: string; hostname: string },
+export async function fetchTunnels(): Promise<TunnelListResult> {
+  const response = await safeFetch(`${BASE()}/api/proxy/tunnels`, { cache: "no-store" });
+  const data = await parse<TunnelListResult>(response);
+  return data;
+}
+
+export async function fetchTunnel(id: number): Promise<ProxyTunnel> {
+  const response = await safeFetch(`${BASE()}/api/proxy/tunnels/${id}`, { cache: "no-store" });
+  const data = await parse<{ data: ProxyTunnel }>(response);
+  return data.data;
+}
+
+export async function createTunnel(
+  input: TunnelCreateInput,
   authHeader?: string,
-): Promise<{ hostname: string; target: string }> {
+): Promise<ProxyTunnel> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await safeFetch(`${BASE()}/api/cloudflare/allocate`, {
+  const response = await safeFetch(`${BASE()}/api/proxy/tunnels`, {
     method: "POST",
     headers,
     body: JSON.stringify(input),
   });
-  const data = await parse<{ data: { hostname: string; target: string } }>(response);
+  const data = await parse<{ data: ProxyTunnel }>(response);
   return data.data;
 }
 
-export async function fetchWorkerRoutes(authHeader?: string): Promise<WorkerRoutesResult> {
-  const headers: Record<string, string> = {};
-  if (authHeader) headers["Authorization"] = authHeader;
-  const response = await safeFetch(`${BASE()}/api/cloudflare/worker-routes`, {
-    cache: "no-store",
-    headers,
-  });
-  const text = await response.text();
-  let routesJson: { success?: boolean; configured?: boolean; data?: WorkerRoute[]; error?: string } = {};
-  if (text) {
-    try { routesJson = JSON.parse(text); } catch { routesJson = { success: false, error: "Invalid JSON response from gateway" }; }
-  }
-  if (!routesJson.success) {
-    return { configured: routesJson.configured ?? false, routes: [], error: routesJson.error };
-  }
-  return { configured: true, routes: routesJson.data ?? [] };
-}
-
-export async function deleteWorkerRoute(
-  routeId: string,
-  zoneId: string,
+export async function deleteTunnel(
+  id: number,
   authHeader?: string,
 ): Promise<void> {
   const headers: Record<string, string> = {};
   if (authHeader) headers["Authorization"] = authHeader;
-  const response = await safeFetch(`${BASE()}/api/cloudflare/worker-routes/${zoneId}/${routeId}`, {
+  const response = await safeFetch(`${BASE()}/api/proxy/tunnels/${id}`, {
     method: "DELETE",
     headers,
   });
   await parse<{ success: boolean }>(response);
+}
+
+export async function startTunnel(
+  id: number,
+  authHeader?: string,
+): Promise<ProxyTunnel> {
+  const headers: Record<string, string> = {};
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE()}/api/proxy/tunnels/${id}/start`, {
+    method: "POST",
+    headers,
+  });
+  const data = await parse<{ data: ProxyTunnel }>(response);
+  return data.data;
+}
+
+export async function stopTunnel(
+  id: number,
+  authHeader?: string,
+): Promise<ProxyTunnel> {
+  const headers: Record<string, string> = {};
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE()}/api/proxy/tunnels/${id}/stop`, {
+    method: "POST",
+    headers,
+  });
+  const data = await parse<{ data: ProxyTunnel }>(response);
+  return data.data;
+}
+
+/**
+ * Allocate a domain/proxy tunnel for a proxy target.
+ * Creates a self-hosted tunnel and returns the hostname + target pair.
+ */
+export async function allocateProxyDomain(
+  input: { proxyId: number; hostname: string },
+  authHeader?: string,
+): Promise<{ hostname: string; target: string; tunnelId: number }> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE()}/api/proxy/tunnels`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ name: input.hostname, type: "http", localPort: 8787, autoStart: true }),
+  });
+  const data = await parse<{ data: ProxyTunnel }>(response);
+  return {
+    hostname: input.hostname,
+    target: `127.0.0.1:${data.data.remotePort}`,
+    tunnelId: data.data.id,
+  };
 }
 
 // ── Intercepts ───────────────────────────────────────────────────────────────
@@ -229,23 +264,23 @@ export async function fetchTraffic(): Promise<TrafficResult> {
   return { entries: data.data, stats: data.stats, meta: readMeta(response, latencyMs) };
 }
 
-// ── Worker config ────────────────────────────────────────────────────────────
+// ── Runtime config ───────────────────────────────────────────────────────────
 
-export async function fetchWorkerConfig(authHeader?: string): Promise<WorkerConfig> {
+export async function fetchRuntimeConfig(authHeader?: string): Promise<RuntimeConfig> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader) headers["Authorization"] = authHeader;
   const response = await safeFetch(`${BASE()}/api/config`, {
     cache: "no-store",
     headers,
   });
-  const data = await parse<{ data: WorkerConfig }>(response);
+  const data = await parse<{ data: RuntimeConfig }>(response);
   return data.data;
 }
 
-export async function updateWorkerConfig(
+export async function updateRuntimeConfig(
   entries: Record<string, string>,
   authHeader?: string,
-): Promise<WorkerConfig> {
+): Promise<RuntimeConfig> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader) headers["Authorization"] = authHeader;
   const response = await safeFetch(`${BASE()}/api/config`, {
@@ -253,18 +288,18 @@ export async function updateWorkerConfig(
     headers,
     body: JSON.stringify(entries),
   });
-  const data = await parse<{ data: WorkerConfig }>(response);
+  const data = await parse<{ data: RuntimeConfig }>(response);
   return data.data;
 }
 
-export async function deleteWorkerConfig(authHeader?: string): Promise<WorkerConfig> {
+export async function deleteRuntimeConfig(authHeader?: string): Promise<RuntimeConfig> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
   if (authHeader) headers["Authorization"] = authHeader;
   const response = await safeFetch(`${BASE()}/api/config`, {
     method: "DELETE",
     headers,
   });
-  const data = await parse<{ data: WorkerConfig }>(response);
+  const data = await parse<{ data: RuntimeConfig }>(response);
   return data.data;
 }
 

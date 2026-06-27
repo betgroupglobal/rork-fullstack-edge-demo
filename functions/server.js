@@ -23,6 +23,33 @@ const configStore = {};
 
 const startedAt = Date.now();
 
+// ── Proxy-manager bridge (Pangolin/frp-style tunnel management) ─────────────
+const PROXY_MANAGER_URL = `http://127.0.0.1:${process.env.PROXY_API_PORT || "7001"}`;
+
+/** Forward a request to the proxy-manager's internal API and return parsed JSON. */
+function proxyManagerFetch(path, options = {}) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(path, PROXY_MANAGER_URL);
+    const lib = url.protocol === "https:" ? https : http;
+    const req = lib.request(url, {
+      method: options.method || "GET",
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+      timeout: 10000,
+    }, (pmRes) => {
+      let data = "";
+      pmRes.on("data", (chunk) => (data += chunk));
+      pmRes.on("end", () => {
+        try { resolve({ status: pmRes.statusCode, body: JSON.parse(data) }); }
+        catch { resolve({ status: pmRes.statusCode, body: null }); }
+      });
+    });
+    req.on("error", (err) => resolve({ status: 502, body: { success: false, error: `proxy-manager unreachable: ${err.message}` } }));
+    req.on("timeout", () => { req.destroy(); resolve({ status: 504, body: { success: false, error: "proxy-manager timeout" } }); });
+    if (options.body) req.write(JSON.stringify(options.body));
+    req.end();
+  });
+}
+
 // ── Kimi K2.7 Phishlet AI ─────────────────────────────────────────────────
 
 /** Simple deterministic phishlet stub for when AI is unavailable. */
@@ -913,59 +940,119 @@ async function handleRequest(req, res) {
     return json(res, 405, { success: false, error: "method not allowed" }, cors);
   }
 
-  // Cloudflare zones
-  if (route.type === "zones") {
-    return json(
-      res,
-      200,
-      {
-        success: true,
-        configured: false,
-        data: [],
-      },
-      cors,
-    );
+  // ── Proxy tunnels (Pangolin/frp/NetBird — replaces Cloudflare zones) ───
+
+  // GET /api/proxy/tunnels — list all tunnels
+  if (pathname === "/api/proxy/tunnels" && method === "GET") {
+    const result = await proxyManagerFetch("/api/proxy/tunnels");
+    return json(res, result.status, result.body, cors);
   }
 
-  // Cloudflare allocate
+  // POST /api/proxy/tunnels — create a new tunnel
+  if (pathname === "/api/proxy/tunnels" && method === "POST") {
+    const authErr = checkAuth(req);
+    if (authErr) return json(res, authErr.status, authErr.body, cors);
+    const body = await readBody(req);
+    const result = await proxyManagerFetch("/api/proxy/tunnels", { method: "POST", body });
+    return json(res, result.status, result.body, cors);
+  }
+
+  // GET /api/proxy/status — overall proxy health
+  if (pathname === "/api/proxy/status" && method === "GET") {
+    const result = await proxyManagerFetch("/api/proxy/status");
+    return json(res, result.status, result.body, cors);
+  }
+
+  // Tunnel-specific operations
+  const tunnelMatch = pathname.match(/^\/api\/proxy\/tunnels\/(\d+)$/);
+  if (tunnelMatch && method === "GET") {
+    const result = await proxyManagerFetch(`/api/proxy/tunnels/${tunnelMatch[1]}`);
+    return json(res, result.status, result.body, cors);
+  }
+  if (tunnelMatch && method === "DELETE") {
+    const authErr = checkAuth(req);
+    if (authErr) return json(res, authErr.status, authErr.body, cors);
+    const result = await proxyManagerFetch(`/api/proxy/tunnels/${tunnelMatch[1]}`, { method: "DELETE" });
+    return json(res, result.status, result.body, cors);
+  }
+
+  const tunnelStartMatch = pathname.match(/^\/api\/proxy\/tunnels\/(\d+)\/start$/);
+  if (tunnelStartMatch && method === "POST") {
+    const authErr = checkAuth(req);
+    if (authErr) return json(res, authErr.status, authErr.body, cors);
+    const result = await proxyManagerFetch(`/api/proxy/tunnels/${tunnelStartMatch[1]}/start`, { method: "POST" });
+    return json(res, result.status, result.body, cors);
+  }
+
+  const tunnelStopMatch = pathname.match(/^\/api\/proxy\/tunnels\/(\d+)\/stop$/);
+  if (tunnelStopMatch && method === "POST") {
+    const authErr = checkAuth(req);
+    if (authErr) return json(res, authErr.status, authErr.body, cors);
+    const result = await proxyManagerFetch(`/api/proxy/tunnels/${tunnelStopMatch[1]}/stop`, { method: "POST" });
+    return json(res, result.status, result.body, cors);
+  }
+
+  // ── Cloudflare compat stubs (mapped to proxy tunnels for frontend compat) ─
+  if (route.type === "zones") {
+    // Return proxy tunnels mapped as Cloudflare zones
+    const result = await proxyManagerFetch("/api/proxy/tunnels");
+    const tunnels = result.body?.data || [];
+    const zones = tunnels.map((t) => ({
+      id: `tunnel-${t.id}`,
+      name: t.name,
+      status: t.status === "running" ? "active" : "paused",
+      type: "self-hosted",
+    }));
+    return json(res, 200, { success: true, configured: tunnels.length > 0, data: zones }, cors);
+  }
+
   if (route.type === "allocate") {
     const authErr = checkAuth(req);
     if (authErr) return json(res, authErr.status, authErr.body, cors);
     const body = await readBody(req);
-    return json(
-      res,
-      200,
-      {
-        success: true,
-        data: {
-          hostname: body?.hostname || "proxy.example.com",
-          target: "edge-gateway.rork.app",
-        },
+    // Create a proxy tunnel for this allocation
+    const proxy = proxies.find((p) => p.id === body?.proxyId);
+    const tunnelResult = await proxyManagerFetch("/api/proxy/tunnels", {
+      method: "POST",
+      body: {
+        name: proxy ? proxy.slug : (body?.hostname || "proxy"),
+        type: "http",
+        localIP: "127.0.0.1",
+        localPort: PORT,
+        remotePort: Math.floor(Math.random() * 10000) + 10000,
+        autoStart: true,
       },
-      cors,
-    );
+    });
+    const tunnel = tunnelResult.body?.data || {};
+    return json(res, 200, {
+      success: true,
+      data: { hostname: body?.hostname || "proxy.example.com", target: `127.0.0.1:${tunnel.remotePort || PORT}`, tunnelId: tunnel.id },
+    }, cors);
   }
 
-  // Worker routes
-  if (route.type === "workerRoutes") {
-    return json(
-      res,
-      200,
-      { success: true, configured: false, data: [] },
-      cors,
-    );
-  }
-  if (route.type === "workerRouteDelete") {
-    const authErr = checkAuth(req);
-    if (authErr) return json(res, authErr.status, authErr.body, cors);
-    return json(res, 200, { success: true }, cors);
-  }
-
-  // Wildcard DNS
   if (route.type === "wildcard") {
     const authErr = checkAuth(req);
     if (authErr) return json(res, authErr.status, authErr.body, cors);
-    return json(res, 200, { success: true, data: {} }, cors);
+    const result = await proxyManagerFetch("/api/proxy/status");
+    return json(res, 200, { success: true, data: result.body?.data || {} }, cors);
+  }
+
+  if (route.type === "workerRoutes") {
+    const result = await proxyManagerFetch("/api/proxy/tunnels");
+    const tunnels = result.body?.data || [];
+    const routes = tunnels.map((t) => ({
+      id: `${t.id}`,
+      pattern: `${t.type}://*:${t.remotePort}/*`,
+      status: t.status,
+    }));
+    return json(res, 200, { success: true, configured: tunnels.length > 0, data: routes }, cors);
+  }
+
+  if (route.type === "workerRouteDelete") {
+    const authErr = checkAuth(req);
+    if (authErr) return json(res, authErr.status, authErr.body, cors);
+    const result = await proxyManagerFetch(`/api/proxy/tunnels/${route.routeId}`, { method: "DELETE" });
+    return json(res, result.status, result.body, cors);
   }
 
   // Replay

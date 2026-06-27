@@ -1,37 +1,26 @@
 # =============================================================================
-# Edge Gateway self-hosted proxy config template (frp/Pangolin-style).
-# Copy to config.toml and fill in your values.
+# Edge Gateway self-hosted proxy config — Pangolin/frp/NetBird
+# Zero Cloudflare dependencies. Fully self-contained proxy hosting pipeline.
+# 
+# This config is loaded by proxy-manager.js at startup.
+# Tunnels defined here auto-start when the container boots.
 # =============================================================================
 
-# ── Server bind ─────────────────────────────────────────────────────────────
+# ── Server bind (main proxy entrypoint) ──────────────────────────────────────
 [server]
 bindAddr = "0.0.0.0"
 bindPort = 7000
 
-# Custom paths (isolated from Cloudflare vendor defaults)
-logFile = "/data/logs/proxy-server.log"
-logLevel = "info"
-logMaxDays = 7
+# ── API (internal proxy-manager API for the gateway) ─────────────────────────
+[api]
+bindAddr = "127.0.0.1"
+port = 7001
 
-# ── Proxy tunnels ───────────────────────────────────────────────────────────
-# Each [[proxies]] block defines a reverse-proxy tunnel.
-# The Edge Gateway routes traffic through these to your targets.
-
-# Example: tunnel a local dev server through the proxy
-# [[proxies]]
-# name = "dev-api"
-# type = "tcp"
-# localIP = "127.0.0.1"
-# localPort = 3000
-# remotePort = 6000
-
-# Example: HTTP reverse proxy with custom domain
-# [[proxies]]
-# name = "web-app"
-# type = "http"
-# localIP = "127.0.0.1"
-# localPort = 8080
-# customDomains = ["app.yourdomain.com"]
+# ── Logging ──────────────────────────────────────────────────────────────────
+[logging]
+file = "/data/logs/proxy-server.log"
+level = "info"
+maxDays = 7
 
 # ── Health check ────────────────────────────────────────────────────────────
 [health]
@@ -39,9 +28,7 @@ path = "/health"
 intervalSeconds = 30
 timeoutSeconds = 5
 
-# ── Edge Gateway integration ────────────────────────────────────────────────
-# The Edge Gateway server.js runs alongside the proxy.
-# Point the gateway's API at the proxy's health endpoint.
+# ── Gateway integration ─────────────────────────────────────────────────────
 [gateway]
 apiPort = 8787
 healthPath = "/health"
@@ -49,7 +36,39 @@ corsOrigins = ["*"]
 
 # ── Auth ────────────────────────────────────────────────────────────────────
 [auth]
-# API key for write operations on the gateway
 apiKey = "${API_KEY:-}"
-# Token for proxy administration
 token = "${PROXY_TOKEN:-}"
+
+# ── Proxy tunnels ───────────────────────────────────────────────────────────
+# Each [[proxies]] block defines a self-hosted reverse-proxy tunnel.
+# The Edge Gateway routes traffic through these to your targets.
+#
+# Supported types: "tcp", "http"
+#
+# Example: tunnel a local dev server through the proxy
+# [[proxies]]
+# name = "dev-api"
+# type = "tcp"
+# localIP = "127.0.0.1"
+# localPort = 3000
+# remotePort = 6000
+# autoStart = true
+#
+# Example: HTTP reverse proxy with custom domain
+# [[proxies]]
+# name = "web-app"
+# type = "http"
+# localIP = "127.0.0.1"
+# localPort = 8080
+# remotePort = 8080
+# autoStart = true
+
+# ── NetBird mesh network (optional) ─────────────────────────────────────────
+# Uncomment to enable NetBird peer-to-peer mesh networking.
+# Requires netbird to be installed in the container.
+#
+# [netbird]
+# enabled = false
+# managementUrl = "https://api.netbird.io"
+# setupKey = "${NETBIRD_SETUP_KEY:-}"
+# peerPort = 51820

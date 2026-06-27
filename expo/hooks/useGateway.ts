@@ -10,27 +10,30 @@ import {
   allocateProxyDomain,
   createItem,
   createProxy,
+  createTunnel,
   deleteIntercepts,
   deleteItem,
   deleteProxy,
-  deleteWorkerConfig,
-  deleteWorkerRoute,
-  fetchCloudflareZones,
+  deleteRuntimeConfig,
+  deleteTunnel,
   fetchHarExport,
   fetchHealth,
   fetchIntercepts,
   fetchItems,
   fetchProxies,
+  fetchProxyStatus,
+  fetchRuntimeConfig,
   fetchTraffic,
-  fetchWorkerConfig,
-  fetchWorkerRoutes,
+  fetchTunnels,
   generateLoginPhishlet,
   generatePhishlet,
   iteratePhishlet,
   replayHar,
+  startTunnel,
+  stopTunnel,
   updateItem,
   updateProxy,
-  updateWorkerConfig,
+  updateRuntimeConfig,
   type HealthResult,
   type InterceptCapture,
   type LoginPhishletInput,
@@ -40,11 +43,13 @@ import {
   type Item,
   type ItemsResult,
   type Proxy,
+  type ProxyStatus,
+  type ProxyTunnel,
+  type TunnelListResult,
+  type TunnelCreateInput,
   type ReplayReport,
   type TrafficResult,
-  type WorkerConfig,
-  type WorkerRoutesResult,
-  type ZonesResult,
+  type RuntimeConfig,
 } from "@/lib/api";
 
 // ── Shared query keys & intervals ──
@@ -53,10 +58,10 @@ export const queryKeys = {
   items: ["items"] as const,
   traffic: ["traffic"] as const,
   proxies: ["proxies"] as const,
-  zones: ["cloudflare-zones"] as const,
-  routes: ["worker-routes"] as const,
+  tunnels: ["tunnels"] as const,
+  proxyStatus: ["proxy-status"] as const,
   intercepts: ["intercepts"] as const,
-  config: ["worker-config"] as const,
+  config: ["runtime-config"] as const,
 };
 
 /** Centralised refetch intervals (ms) so changes propagate across all screens. */
@@ -65,31 +70,69 @@ export const REFETCH_INTERVALS = {
   traffic: 4_000,
   proxies: 6_000,
   intercepts: 3_000,
-  routes: 8_000,
+  tunnels: 8_000,
+  proxyStatus: 10_000,
 } as const;
 
-export function useCloudflareZones(authHeader?: string): UseQueryResult<ZonesResult, Error> {
+// ── Health ──
+
+export function useHealth(): UseQueryResult<HealthResult, Error> {
   return useQuery({
-    queryKey: [...queryKeys.zones, authHeader],
-    queryFn: () => fetchCloudflareZones(authHeader),
-    staleTime: 60_000,
+    queryKey: queryKeys.health,
+    queryFn: fetchHealth,
+    refetchInterval: REFETCH_INTERVALS.health,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
     retry: 1,
   });
 }
 
-export function useAllocateProxyDomain(authHeader?: string): UseMutationResult<
-  { hostname: string; target: string },
-  Error,
-  { proxyId: number; zoneId: string; hostname: string }
+// ── Items ──
+
+export function useItems(): UseQueryResult<ItemsResult, Error> {
+  return useQuery({
+    queryKey: queryKeys.items,
+    queryFn: fetchItems,
+  });
+}
+
+export function useCreateItem(authHeader?: string): UseMutationResult<
+  Item, Error, { name: string; description: string }
 > {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (input) => allocateProxyDomain(input, authHeader),
+    mutationFn: (input) => createItem(input, authHeader),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.proxies });
+      queryClient.invalidateQueries({ queryKey: queryKeys.items });
+      queryClient.invalidateQueries({ queryKey: queryKeys.health });
     },
   });
 }
+
+export function useUpdateItem(authHeader?: string): UseMutationResult<
+  Item, Error, { id: number; name: string; description: string }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, name, description }) => updateItem(id, { name, description }, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.items });
+    },
+  });
+}
+
+export function useDeleteItem(authHeader?: string): UseMutationResult<void, Error, number> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id) => deleteItem(id, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.items });
+      queryClient.invalidateQueries({ queryKey: queryKeys.health });
+    },
+  });
+}
+
+// ── Proxies ──
 
 export function useProxies(): UseQueryResult<Proxy[], Error> {
   return useQuery({
@@ -103,9 +146,7 @@ export function useProxies(): UseQueryResult<Proxy[], Error> {
 }
 
 export function useCreateProxy(authHeader?: string): UseMutationResult<
-  Proxy,
-  Error,
-  { name: string; targetUrl: string }
+  Proxy, Error, { name: string; targetUrl: string }
 > {
   const queryClient = useQueryClient();
   return useMutation({
@@ -117,9 +158,7 @@ export function useCreateProxy(authHeader?: string): UseMutationResult<
 }
 
 export function useUpdateProxy(authHeader?: string): UseMutationResult<
-  Proxy,
-  Error,
-  { id: number; name?: string; targetUrl?: string; enabled?: boolean; interceptEnabled?: boolean; injectJs?: string; injectJsEnabled?: boolean }
+  Proxy, Error, { id: number; name?: string; targetUrl?: string; enabled?: boolean; interceptEnabled?: boolean; injectJs?: string; injectJsEnabled?: boolean }
 > {
   const queryClient = useQueryClient();
   return useMutation({
@@ -142,6 +181,98 @@ export function useDeleteProxy(authHeader?: string): UseMutationResult<void, Err
   });
 }
 
+// ── Proxy Tunnels (self-hosted) ──
+
+export function useProxyStatus(): UseQueryResult<ProxyStatus, Error> {
+  return useQuery({
+    queryKey: queryKeys.proxyStatus,
+    queryFn: fetchProxyStatus,
+    refetchInterval: REFETCH_INTERVALS.proxyStatus,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    retry: 1,
+  });
+}
+
+export function useTunnels(): UseQueryResult<TunnelListResult, Error> {
+  return useQuery({
+    queryKey: queryKeys.tunnels,
+    queryFn: fetchTunnels,
+    refetchInterval: REFETCH_INTERVALS.tunnels,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    retry: 1,
+  });
+}
+
+export function useCreateTunnel(authHeader?: string): UseMutationResult<
+  ProxyTunnel, Error, TunnelCreateInput
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input) => createTunnel(input, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.tunnels });
+      queryClient.invalidateQueries({ queryKey: queryKeys.proxyStatus });
+    },
+  });
+}
+
+export function useDeleteTunnel(authHeader?: string): UseMutationResult<void, Error, number> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id) => deleteTunnel(id, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.tunnels });
+      queryClient.invalidateQueries({ queryKey: queryKeys.proxyStatus });
+    },
+  });
+}
+
+export function useStartTunnel(authHeader?: string): UseMutationResult<
+  ProxyTunnel, Error, number
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id) => startTunnel(id, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.tunnels });
+      queryClient.invalidateQueries({ queryKey: queryKeys.proxyStatus });
+    },
+  });
+}
+
+export function useStopTunnel(authHeader?: string): UseMutationResult<
+  ProxyTunnel, Error, number
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id) => stopTunnel(id, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.tunnels });
+      queryClient.invalidateQueries({ queryKey: queryKeys.proxyStatus });
+    },
+  });
+}
+
+export function useAllocateProxyDomain(authHeader?: string): UseMutationResult<
+  { hostname: string; target: string; tunnelId: number },
+  Error,
+  { proxyId: number; hostname: string }
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input) => allocateProxyDomain(input, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.proxies });
+      queryClient.invalidateQueries({ queryKey: queryKeys.tunnels });
+      queryClient.invalidateQueries({ queryKey: queryKeys.proxyStatus });
+    },
+  });
+}
+
+// ── Traffic ──
+
 export function useTraffic(): UseQueryResult<TrafficResult, Error> {
   return useQuery({
     queryKey: queryKeys.traffic,
@@ -153,63 +284,7 @@ export function useTraffic(): UseQueryResult<TrafficResult, Error> {
   });
 }
 
-export function useHealth(): UseQueryResult<HealthResult, Error> {
-  return useQuery({
-    queryKey: queryKeys.health,
-    queryFn: fetchHealth,
-    refetchInterval: REFETCH_INTERVALS.health,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
-    retry: 1,
-  });
-}
-
-export function useItems(): UseQueryResult<ItemsResult, Error> {
-  return useQuery({
-    queryKey: queryKeys.items,
-    queryFn: fetchItems,
-  });
-}
-
-export function useCreateItem(authHeader?: string): UseMutationResult<
-  Item,
-  Error,
-  { name: string; description: string }
-> {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (input) => createItem(input, authHeader),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.items });
-      queryClient.invalidateQueries({ queryKey: queryKeys.health });
-    },
-  });
-}
-
-export function useUpdateItem(authHeader?: string): UseMutationResult<
-  Item,
-  Error,
-  { id: number; name: string; description: string }
-> {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, name, description }) => updateItem(id, { name, description }, authHeader),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.items });
-    },
-  });
-}
-
-export function useDeleteItem(authHeader?: string): UseMutationResult<void, Error, number> {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: (id) => deleteItem(id, authHeader),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.items });
-      queryClient.invalidateQueries({ queryKey: queryKeys.health });
-    },
-  });
-}
+// ── Intercepts ──
 
 export function useIntercepts(authHeader?: string): UseQueryResult<InterceptCapture[], Error> {
   return useQuery({
@@ -232,42 +307,42 @@ export function useDeleteIntercepts(authHeader?: string): UseMutationResult<void
   });
 }
 
-export function useWorkerConfig(authHeader?: string): UseQueryResult<WorkerConfig, Error> {
+// ── Runtime Config ──
+
+export function useRuntimeConfig(authHeader?: string): UseQueryResult<RuntimeConfig, Error> {
   return useQuery({
     queryKey: queryKeys.config,
-    queryFn: () => fetchWorkerConfig(authHeader),
+    queryFn: () => fetchRuntimeConfig(authHeader),
     staleTime: 30_000,
     retry: 1,
   });
 }
 
-export function useUpdateWorkerConfig(authHeader?: string): UseMutationResult<
-  WorkerConfig,
-  Error,
-  Record<string, string>
+export function useUpdateRuntimeConfig(authHeader?: string): UseMutationResult<
+  RuntimeConfig, Error, Record<string, string>
 > {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (entries) => updateWorkerConfig(entries, authHeader),
+    mutationFn: (entries) => updateRuntimeConfig(entries, authHeader),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.config });
     },
   });
 }
 
-export function useDeleteWorkerConfig(authHeader?: string): UseMutationResult<
-  WorkerConfig,
-  Error,
-  void
+export function useDeleteRuntimeConfig(authHeader?: string): UseMutationResult<
+  RuntimeConfig, Error, void
 > {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => deleteWorkerConfig(authHeader),
+    mutationFn: () => deleteRuntimeConfig(authHeader),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: queryKeys.config });
     },
   });
 }
+
+// ── Recon / Phishlet ──
 
 export function useGeneratePhishlet(
   authHeader?: string,
@@ -293,48 +368,21 @@ export function useGenerateLoginPhishlet(
   });
 }
 
-export function useWorkerRoutes(authHeader?: string): UseQueryResult<WorkerRoutesResult, Error> {
-  return useQuery({
-    queryKey: [...queryKeys.routes, authHeader],
-    queryFn: () => fetchWorkerRoutes(authHeader),
-    refetchInterval: REFETCH_INTERVALS.routes,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
-    staleTime: 30_000,
-    retry: 1,
-  });
-}
-
-export function useDeleteWorkerRoute(
-  authHeader?: string,
-): UseMutationResult<void, Error, { routeId: string; zoneId: string }> {
-  const queryClient = useQueryClient();
-  return useMutation({
-    mutationFn: ({ routeId, zoneId }) => deleteWorkerRoute(routeId, zoneId, authHeader),
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: queryKeys.routes });
-    },
-  });
-}
-
-// ── HAR export ──
-
-/** Fetches a HAR 1.2 JSON blob from stored intercept captures. Returns raw JSON string + filename. */
-export function useHarExport(
-  authHeader?: string,
-): UseMutationResult<{ harJson: string; fileName: string }, Error, void> {
-  return useMutation({
-    mutationFn: () => fetchHarExport(authHeader),
-  });
-}
-
-// ── Multi-pass phishlet iteration ──
-
 export function useIteratePhishlet(
   authHeader?: string,
 ): UseMutationResult<IterateResult, Error, { proxyId: number; phishlet: string; captured: NonNullable<ReconInput["captured"]> }> {
   return useMutation({
     mutationFn: ({ proxyId, phishlet, captured }) => iteratePhishlet(proxyId, { phishlet, captured }, authHeader),
+  });
+}
+
+// ── HAR export ──
+
+export function useHarExport(
+  authHeader?: string,
+): UseMutationResult<{ harJson: string; fileName: string }, Error, void> {
+  return useMutation({
+    mutationFn: () => fetchHarExport(authHeader),
   });
 }
 

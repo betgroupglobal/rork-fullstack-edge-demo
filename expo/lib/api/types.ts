@@ -50,26 +50,58 @@ export type Proxy = {
   hits: number;
   proxyDomain: string;
   interceptEnabled: boolean;
-  cfZoneId: string;
-  cfRecordId: string;
   injectJs: string;
   injectJsEnabled: boolean;
   phishlet: string;
+  tunnelId: number | null;
   createdAt: number;
   updatedAt: number;
 };
 
-export type CloudflareZone = {
-  id: string;
+// ── Self-hosted proxy tunnel types (Pangolin/frp/NetBird) ──
+
+export type ProxyTunnel = {
+  id: number;
   name: string;
-  status: string;
+  type: "tcp" | "http";
+  remotePort: number;
+  localHost: string;
+  localPort: number;
+  status: "running" | "stopped" | "error";
+  uptime: number;
+  bytesIn: number;
+  bytesOut: number;
+  activeConns: number;
 };
 
-export type ZonesResult = {
-  configured: boolean;
-  zones: CloudflareZone[];
-  error?: string;
+export type TunnelListResult = {
+  data: ProxyTunnel[];
+  count: number;
 };
+
+export type TunnelCreateInput = {
+  name: string;
+  type?: "tcp" | "http";
+  localIP?: string;
+  localPort: number;
+  remotePort?: number;
+  autoStart?: boolean;
+};
+
+export type ProxyStatus = {
+  status: string;
+  tunnelCount: number;
+  tunnelsRunning: number;
+  tunnelsStopped: number;
+  totalBytesTransferred: number;
+  totalActiveConns: number;
+  config: {
+    bindAddr: string;
+    bindPort: number;
+  };
+};
+
+// ── Recon / Phishlet types ──
 
 export type ReconInput = {
   targetUrl: string;
@@ -108,20 +140,6 @@ export type LoginPhishletInput = {
   };
 };
 
-export type WorkerRoute = {
-  id: string;
-  pattern: string;
-  script: string;
-  zoneId?: string;
-  zoneName?: string;
-};
-
-export type WorkerRoutesResult = {
-  configured: boolean;
-  routes: WorkerRoute[];
-  error?: string;
-};
-
 export type InterceptCapture = {
   id: number;
   ts: number;
@@ -149,7 +167,7 @@ export type TrafficResult = {
   meta: GatewayMeta;
 };
 
-export type WorkerConfig = Record<string, string>;
+export type RuntimeConfig = Record<string, string>;
 
 export type ReplayEntry = {
   index: number;

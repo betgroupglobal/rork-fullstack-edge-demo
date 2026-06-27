@@ -9,6 +9,7 @@ import {
   Globe,
   Link2,
   Loader,
+  Network,
   Power,
   Trash2,
   Wand2,
@@ -36,10 +37,10 @@ import { theme } from "@/constants/theme";
 import { useApiKey } from "@/hooks/useApiKey";
 import {
   useAllocateProxyDomain,
-  useCloudflareZones,
   useCreateProxy,
   useDeleteProxy,
   useProxies,
+  useTunnels,
   useUpdateProxy,
 } from "@/hooks/useGateway";
 import { getBaseUrl, proxyUrl, type Proxy } from "@/lib/api";
@@ -86,7 +87,7 @@ function analyseTarget(targetUrl: string): string {
 function ProxyCard({ proxy, authHeader }: { proxy: Proxy; authHeader?: string }) {
   const update = useUpdateProxy(authHeader);
   const removeProxy = useDeleteProxy(authHeader);
-  const { data: zonesResult, isLoading: zonesLoading } = useCloudflareZones(authHeader);
+  const { data: tunnelsResult } = useTunnels();
   const allocate = useAllocateProxyDomain(authHeader);
 
   const [showEdit, setShowEdit] = useState(false);
@@ -97,17 +98,19 @@ function ProxyCard({ proxy, authHeader }: { proxy: Proxy; authHeader?: string })
   const [injectJs, setInjectJs] = useState(proxy.injectJs ?? "");
   const [domainCopied, setDomainCopied] = useState(false);
   const [urlCopied, setUrlCopied] = useState(false);
-  const [selectedZoneId, setSelectedZoneId] = useState<string>("");
   const [hostname, setHostname] = useState("");
   const [domainError, setDomainError] = useState<string | null>(null);
 
-  const zones = zonesResult?.configured ? (zonesResult?.zones ?? []) : [];
+  const tunnels = tunnelsResult?.data ?? [];
+  const proxyTunnel = proxy.tunnelId ? tunnels.find((t) => t.id === proxy.tunnelId) : null;
 
   const url = proxyUrl(proxy.slug);
   const domainUrl = proxy.proxyDomain ? `https://${proxy.proxyDomain}` : "";
+  const tunnelUrl = proxyTunnel ? `tcp://0.0.0.0:${proxyTunnel.remotePort}` : "";
 
   const copyUrl = async () => { await Clipboard.setStringAsync(url); setUrlCopied(true); setTimeout(() => setUrlCopied(false), 1400); };
   const copyDomain = async () => { if (!domainUrl) return; await Clipboard.setStringAsync(domainUrl); setDomainCopied(true); setTimeout(() => setDomainCopied(false), 1400); };
+  const copyTunnel = async () => { if (!tunnelUrl) return; await Clipboard.setStringAsync(tunnelUrl); setDomainCopied(true); setTimeout(() => setDomainCopied(false), 1400); };
 
   const toggle = () => update.mutate({ id: proxy.id, enabled: !proxy.enabled });
   const toggleIntercept = () => update.mutate({ id: proxy.id, interceptEnabled: !proxy.interceptEnabled });
@@ -128,16 +131,12 @@ function ProxyCard({ proxy, authHeader }: { proxy: Proxy; authHeader?: string })
     setInjectJs(snippet);
   };
 
-  const selectedZone = useMemo(() => zones.find((z) => z.id === selectedZoneId), [zones, selectedZoneId]);
-
   const allocateDomain = () => {
-    const zoneId = selectedZoneId;
     const h = hostname.trim().toLowerCase();
-    if (!zoneId) { setDomainError("Select a Cloudflare zone."); return; }
     if (!h || !/^[a-z0-9.-]+\.[a-z]{2,}$/.test(h)) { setDomainError("Enter a valid hostname."); return; }
     setDomainError(null);
     allocate.mutate(
-      { proxyId: proxy.id, zoneId, hostname: h },
+      { proxyId: proxy.id, hostname: h },
       { onSuccess: () => setShowDomain(false) },
     );
   };
@@ -195,36 +194,33 @@ function ProxyCard({ proxy, authHeader }: { proxy: Proxy; authHeader?: string })
           <Text style={styles.domainText} numberOfLines={1}>https://{proxy.proxyDomain}</Text>
           {domainCopied ? <Check size={12} color={theme.colors.ok} /> : <Copy size={12} color={theme.colors.textDim} />}
         </Pressable>
+      ) : proxyTunnel ? (
+        <Pressable onPress={copyTunnel} style={({ pressed }) => [styles.tunnelBanner, pressed && styles.pressed]}>
+          <Network size={12} color={theme.colors.ok} />
+          <View style={styles.tunnelInfo}>
+            <Text style={styles.tunnelText} numberOfLines={1}>{tunnelUrl}</Text>
+            <Text style={styles.tunnelStatus}>{proxyTunnel.status} · {proxyTunnel.bytesIn + proxyTunnel.bytesOut} bytes</Text>
+          </View>
+        </Pressable>
       ) : null}
 
       {/* Domain allocation panel */}
       {showDomain && (
         <View style={styles.domainPanel}>
-          <Text style={styles.fieldLabel}>CLOUDFLARE ZONE</Text>
-          {zonesLoading ? (
-            <ActivityIndicator color={theme.colors.accent} />
-          ) : zones.length === 0 ? (
-            <Text style={styles.domainHint}>No active zones found. Add Cloudflare credentials in Settings.</Text>
-          ) : (
-            <View style={styles.zoneList}>
-              {zones.map((z) => (
-                <Pressable key={z.id} onPress={() => { setSelectedZoneId(z.id); setHostname(`${proxy.slug}.${z.name}`); }} style={({ pressed }) => [styles.zoneChip, selectedZoneId === z.id && styles.zoneChipActive, pressed && styles.pressed]}>
-                  <Globe size={11} color={selectedZoneId === z.id ? theme.colors.accent : theme.colors.textFaint} />
-                  <Text style={[styles.zoneChipText, selectedZoneId === z.id && styles.zoneChipTextActive]} numberOfLines={1}>{z.name}</Text>
-                </Pressable>
-              ))}
-            </View>
-          )}
-          {selectedZone ? (
-            <>
-              <Text style={styles.fieldLabel}>HOSTNAME</Text>
-              <TextInput value={hostname} onChangeText={setHostname} style={styles.fieldInput} placeholder={`${proxy.slug}.${selectedZone.name}`} placeholderTextColor={theme.colors.textFaint} autoCapitalize="none" autoCorrect={false} />
-            </>
-          ) : null}
+          <Text style={styles.fieldLabel}>HOSTNAME</Text>
+          <TextInput
+            value={hostname}
+            onChangeText={setHostname}
+            style={styles.fieldInput}
+            placeholder={`${proxy.slug}.example.com`}
+            placeholderTextColor={theme.colors.textFaint}
+            autoCapitalize="none"
+            autoCorrect={false}
+          />
           {domainError ? <Text style={styles.formError}>{domainError}</Text> : null}
-          <Pressable onPress={allocateDomain} disabled={allocate.isPending || zones.length === 0} style={({ pressed }) => [styles.saveBtn, pressed && styles.pressed]}>
-            {allocate.isPending ? <ActivityIndicator size="small" color={theme.colors.bg} /> : <Globe size={13} color={theme.colors.bg} />}
-            <Text style={styles.saveBtnText}>Allocate domain</Text>
+          <Pressable onPress={allocateDomain} disabled={allocate.isPending} style={({ pressed }) => [styles.saveBtn, pressed && styles.pressed]}>
+            {allocate.isPending ? <ActivityIndicator size="small" color={theme.colors.bg} /> : <Network size={13} color={theme.colors.bg} />}
+            <Text style={styles.saveBtnText}>Create tunnel</Text>
           </Pressable>
         </View>
       )}
@@ -284,9 +280,9 @@ function ProxyCard({ proxy, authHeader }: { proxy: Proxy; authHeader?: string })
           <Bug size={13} color={proxy.interceptEnabled ? theme.colors.warn : theme.colors.textFaint} />
           <Text style={[styles.actionText, { color: proxy.interceptEnabled ? theme.colors.warn : theme.colors.textDim }]}>{proxy.interceptEnabled ? "Capturing" : "Intercept"}</Text>
         </Pressable>
-        <Pressable onPress={() => { setShowDomain(v => !v); setSelectedZoneId(""); setHostname(""); setDomainError(null); }} style={({ pressed }) => [styles.actionBtn, pressed && styles.pressed, showDomain && styles.actionBtnActive]}>
-          <Globe size={13} color={proxy.proxyDomain ? theme.colors.ok : showDomain ? theme.colors.accent : theme.colors.textFaint} />
-          <Text style={[styles.actionText, { color: proxy.proxyDomain ? theme.colors.ok : showDomain ? theme.colors.accent : theme.colors.textDim }]}>{proxy.proxyDomain ? "Domain" : "Domain"}</Text>
+        <Pressable onPress={() => { setShowDomain(v => !v); setHostname(""); setDomainError(null); }} style={({ pressed }) => [styles.actionBtn, pressed && styles.pressed, showDomain && styles.actionBtnActive]}>
+          <Network size={13} color={proxy.proxyDomain || proxyTunnel ? theme.colors.ok : showDomain ? theme.colors.accent : theme.colors.textFaint} />
+          <Text style={[styles.actionText, { color: proxy.proxyDomain || proxyTunnel ? theme.colors.ok : showDomain ? theme.colors.accent : theme.colors.textDim }]}>Tunnel</Text>
         </Pressable>
         <Pressable onPress={remove} disabled={removeProxy.isPending} style={({ pressed }) => [styles.actionBtn, pressed && styles.pressed]}>
           <Trash2 size={13} color={theme.colors.danger} />
@@ -367,7 +363,7 @@ export default function ProxiesScreen() {
             />
             {formError ? <Text style={styles.formError}>{formError}</Text> : null}
             <PressableScale haptic="heavy" onPress={submit} disabled={createProxy.isPending} style={[styles.deployBtn, createProxy.isPending && styles.deployBtnBusy]}>
-              {createProxy.isPending ? <Loader size={16} color={theme.colors.bg} /> : <Globe size={16} color={theme.colors.bg} />}
+              {createProxy.isPending ? <Loader size={16} color={theme.colors.bg} /> : <Network size={16} color={theme.colors.bg} />}
               <Text style={styles.deployText}>{createProxy.isPending ? "Deploying…" : "Deploy proxy"}</Text>
             </PressableScale>
           </View>
@@ -382,7 +378,7 @@ export default function ProxiesScreen() {
             </View>
           ) : proxies.length === 0 ? (
             <View style={styles.stateCard}>
-              <Globe size={28} color={theme.colors.textFaint} />
+              <Network size={28} color={theme.colors.textFaint} />
               <Text style={styles.stateText}>No targets yet. Add a domain above to start routing traffic through the gateway.</Text>
             </View>
           ) : (
@@ -417,7 +413,6 @@ const styles = StyleSheet.create({
   statPillLabel: { color: theme.colors.textDim, fontSize: 9, fontWeight: "700", letterSpacing: 0.5, fontFamily: theme.font.mono },
   stateCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(6), gap: theme.spacing(3), alignItems: "center" },
   stateText: { color: theme.colors.textDim, fontSize: 14, lineHeight: 21, textAlign: "center" },
-  errorText: { color: theme.colors.danger, fontSize: 14, fontFamily: theme.font.mono, textAlign: "center" },
   sectionTitle: { color: theme.colors.textDim, fontSize: 11, fontWeight: "700", letterSpacing: 1.5, fontFamily: theme.font.mono },
 
   // Form
@@ -452,6 +447,10 @@ const styles = StyleSheet.create({
   url: { color: theme.colors.textDim, fontSize: 11, fontFamily: theme.font.mono, flexShrink: 1 },
   domainBanner: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2), backgroundColor: "rgba(60,224,138,0.07)", borderRadius: theme.radius.sm, borderWidth: 1, borderColor: "rgba(60,224,138,0.25)", paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2) },
   domainText: { color: theme.colors.ok, fontSize: 12, fontFamily: theme.font.mono, flex: 1 },
+  tunnelBanner: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2), backgroundColor: "rgba(184,255,60,0.07)", borderRadius: theme.radius.sm, borderWidth: 1, borderColor: "rgba(184,255,60,0.25)", paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2) },
+  tunnelInfo: { flex: 1 },
+  tunnelText: { color: theme.colors.accent, fontSize: 11, fontFamily: theme.font.mono },
+  tunnelStatus: { color: theme.colors.textFaint, fontSize: 9, fontFamily: theme.font.mono, marginTop: 1 },
 
   // Edit
   editPanel: { backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3), gap: theme.spacing(2) },
@@ -480,12 +479,6 @@ const styles = StyleSheet.create({
   actionBtnActive: { backgroundColor: "rgba(184,255,60,0.12)", borderWidth: 1, borderColor: theme.colors.accent },
   actionText: { fontSize: 12, fontWeight: "700" },
   domainPanel: { backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3), gap: theme.spacing(2) },
-  domainHint: { color: theme.colors.textDim, fontSize: 12, fontFamily: theme.font.mono },
-  zoneList: { flexDirection: "row", flexWrap: "wrap", gap: theme.spacing(2) },
-  zoneChip: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5), backgroundColor: theme.colors.surface, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2) },
-  zoneChipActive: { backgroundColor: "rgba(184,255,60,0.12)", borderColor: theme.colors.accent },
-  zoneChipText: { color: theme.colors.textDim, fontSize: 12, fontWeight: "600", fontFamily: theme.font.mono },
-  zoneChipTextActive: { color: theme.colors.accent },
   actionBtnSm: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(1.5), backgroundColor: theme.colors.surfaceAlt, borderRadius: theme.radius.sm, paddingHorizontal: theme.spacing(2.5), paddingVertical: theme.spacing(2) },
   actionBtnSmWarn: { borderWidth: 1, borderColor: theme.colors.warn },
   actionSmText: { fontSize: 10, fontWeight: "700" },
