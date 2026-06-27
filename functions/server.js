@@ -375,7 +375,7 @@ async function handleRequest(req, res) {
     return json(res, 405, { success: false, error: "method not allowed" }, cors);
   }
 
-  // HAR export
+  // HAR export — returns raw HAR 1.2 JSON (not wrapped in API envelope)
   if (route.type === "harExport") {
     if (method !== "GET")
       return json(res, 405, { success: false, error: "method not allowed" }, cors);
@@ -415,11 +415,13 @@ async function handleRequest(req, res) {
       },
     };
     const harJson = JSON.stringify(har);
-    return json(res, 200, JSON.parse(harJson), {
+    res.writeHead(200, {
       ...cors,
       "Content-Type": "application/har+json",
       "Content-Disposition": `attachment; filename="edge-gateway-${new Date().toISOString().slice(0, 10)}.har"`,
     });
+    res.end(harJson);
+    return;
   }
 
   // Traffic
