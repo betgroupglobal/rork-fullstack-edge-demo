@@ -1,9 +1,0 @@
-# Edge Gateway — self-hosted proxy pipeline (Pangolin/frp/NetBird)
-# This file exists for the deployment check only.
-# The actual runtime is server.js + proxy-manager.js via Docker/Railway.
-name = "edge-gateway-backend"
-main = "index.ts"
-compatibility_date = "2025-12-01"
-
-[env.production]
-vars = { ENVIRONMENT = "production" }

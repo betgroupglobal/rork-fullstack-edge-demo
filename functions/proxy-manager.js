@@ -8,6 +8,7 @@
 import http from "node:http";
 import net from "node:net";
 import fs from "node:fs";
+import { spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 
 // ── Configuration ────────────────────────────────────────────────────────────
@@ -256,7 +257,7 @@ function launchProxyServer(def) {
   let child;
   try {
     // Spawn a dedicated proxy-manager process with the instance config
-    child = require("node:child_process").spawn(
+    child = spawn(
       process.execPath,
       ["-e", `
         process.env.CONFIG_PATH = "${configPath}";
