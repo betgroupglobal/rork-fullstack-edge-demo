@@ -1,0 +1,13 @@
+{
+  "name": "rork-fullstack-edge-demo-root",
+  "private": true,
+  "workspaces": [
+    "expo",
+    "functions"
+  ],
+  "devDependencies": {
+    "@expo/cli": "^56.1.16",
+    "rork": "^1.0.1",
+    "wrangler": "^4.101.0"
+  }
+}

@@ -28,6 +28,12 @@ export default function ProxiesScreen() {
   const insets = useSafeAreaInsets();
   const ah = useApiKey();
   const { data, isLoading, isError, error, refetch, isFetching } = useProxies();
+  const [refreshing, setRefreshing] = useState(false);
+  const onRefresh = useCallback(async () => {
+    setRefreshing(true);
+    await refetch();
+    setRefreshing(false);
+  }, [refetch]);
   const createProxy = useCreateProxy(ah);
 
   // Server launch management
@@ -113,8 +119,8 @@ export default function ProxiesScreen() {
           showsVerticalScrollIndicator={false}
           refreshControl={
             <RefreshControl
-              refreshing={isFetching}
-              onRefresh={() => refetch()}
+              refreshing={refreshing}
+              onRefresh={onRefresh}
               tintColor={theme.colors.accent}
               colors={[theme.colors.accent]}
             />
