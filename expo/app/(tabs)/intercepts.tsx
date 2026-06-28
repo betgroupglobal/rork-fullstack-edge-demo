@@ -34,12 +34,6 @@ export default function InterceptsScreen() {
   const insets = useSafeAreaInsets();
   const ah = useApiKey();
   const { data, isLoading, isFetching, isError, error, dataUpdatedAt, refetch } = useIntercepts(ah);
-  const [refreshing, setRefreshing] = useState(false);
-  const onRefresh = useCallback(async () => {
-    setRefreshing(true);
-    await refetch();
-    setRefreshing(false);
-  }, [refetch]);
   const deleteAll = useDeleteIntercepts(ah);
   const harExport = useHarExport(ah);
   const replay = useReplayHar(ah);
@@ -112,8 +106,8 @@ export default function InterceptsScreen() {
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
-            refreshing={refreshing}
-            onRefresh={onRefresh}
+            refreshing={isFetching}
+            onRefresh={() => refetch()}
             tintColor={theme.colors.warn}
             colors={[theme.colors.warn]}
           />
