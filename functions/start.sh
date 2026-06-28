@@ -14,6 +14,12 @@ PORT="${PORT:-8787}"
 PROXY_PORT="${PROXY_PORT:-7000}"
 HEALTH_PORT="${PORT}"
 
+# Ensure curl health checks bypass any upstream proxy (BrightData/residential)
+export no_proxy="127.0.0.1,localhost,::1"
+export NO_PROXY="127.0.0.1,localhost,::1"
+# Also unset any proxy vars that could intercept loopback traffic
+unset http_proxy HTTP_PROXY https_proxy HTTPS_PROXY 2>/dev/null || true
+
 # Kimi K2.7 AI proxy (Rork Toolkit)
 TOOLKIT_URL="${TOOLKIT_URL:-}"
 TOOLKIT_SECRET_KEY="${TOOLKIT_SECRET_KEY:-}"
