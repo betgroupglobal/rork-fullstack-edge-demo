@@ -63,6 +63,38 @@ export default {
       );
     }
 
+    // Items stub
+    if (url.pathname === "/api/items") {
+      return new Response(
+        JSON.stringify({ success: true, data: [] }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // Traffic stub — must include data + stats to avoid frontend crash
+    if (url.pathname === "/api/traffic") {
+      return new Response(
+        JSON.stringify({ success: true, data: [], stats: { total: 0, avgLatency: 0, errorCount: 0, cacheHits: 0 } }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // Intercepts stub
+    if (url.pathname === "/api/intercepts") {
+      return new Response(
+        JSON.stringify({ success: true, data: [], count: 0 }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // Config stub
+    if (url.pathname === "/api/config") {
+      return new Response(
+        JSON.stringify({ success: true, data: {} }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
     // Default: redirect to self-hosted backend
     return new Response(
       JSON.stringify({

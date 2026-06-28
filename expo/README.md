@@ -1,318 +1,459 @@
-# Welcome to your Rork app
+# Edge Gateway Dashboard
 
-## Project info
+A full-stack reverse-proxy management platform for intercepting, analyzing, and replaying HTTP traffic — with a self-hosted proxy pipeline (Pangolin/frp/NetBird), AI-powered phishlet generation (Kimi K2.7), and Grok Build 0.1 server config orchestration. Zero Cloudflare dependencies.
 
-This is a native cross-platform mobile app created with [Rork](https://rork.com)
+Built with Expo Router + React Native (iOS, Android, Web) and a standalone Node.js backend.
 
-**Platform**: Native iOS & Android app, exportable to web
-**Framework**: Expo Router + React Native
+---
 
-## How can I edit this code?
+## Architecture
 
-There are several ways of editing your native mobile application.
-
-### **Use Rork**
-
-Simply visit [rork.com](https://rork.com) and prompt to build your app with AI.
-
-Changes made via Rork will be committed automatically to this GitHub repo.
-
-Whenever you make a change in your local code editor and push it to GitHub, it will be also reflected in Rork.
-
-### **Use your preferred code editor**
-
-If you want to work locally using your own code editor, you can clone this repo and push changes. Pushed changes will also be reflected in Rork.
-
-If you are new to coding and unsure which editor to use, we recommend Cursor. If you're familiar with terminals, try Claude Code.
-
-The only requirement is having Node.js & Bun installed - [install Node.js with nvm](https://github.com/nvm-sh/nvm) and [install Bun](https://bun.sh/docs/installation)
-
-Follow these steps:
-
-```bash
-# Step 1: Clone the repository using the project's Git URL.
-git clone <YOUR_GIT_URL>
-
-# Step 2: Navigate to the project directory.
-cd <YOUR_PROJECT_NAME>
-
-# Step 3: Install the necessary dependencies.
-bun i
-
-# Step 4: Start the instant web preview of your Rork app in your browser, with auto-reloading of your changes
-bun run start-web
-
-# Step 5: Start iOS preview
-# Option A (recommended):
-bun run start  # then press "i" in the terminal to open iOS Simulator
-# Option B (if supported by your environment):
-bun run start -- --ios
+```
+┌─────────────────────────────────────────────────────┐
+│  Expo Mobile App (iOS / Android / Web)              │
+│  ┌─────────┐ ┌──────────┐ ┌──────────┐ ┌────────┐  │
+│  │Dashboard│ │ Proxies  │ │Intercepts│ │ Recon  │  │
+│  └─────────┘ └──────────┘ └──────────┘ └────────┘  │
+│           React Query → REST API (JSON)              │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│  Gateway Server (Node.js — port 8787)               │
+│  • REST API for proxies, tunnels, traffic, config   │
+│  • AI pipeline: Kimi K2.7 + Grok Build 0.1          │
+│  • HAR export, replay engine, auth stubs            │
+└──────────────────────┬──────────────────────────────┘
+                       │ internal API (port 7001)
+┌──────────────────────▼──────────────────────────────┐
+│  Proxy Manager (Node.js — port 7000)                │
+│  • Self-hosted TCP/HTTP tunnel management           │
+│  • Launch/stop child proxy server instances         │
+│  • Health checks, logging, stats                    │
+└──────────────────────┬──────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────┐
+│  Proxy Adapter (optional — Bright Data upstream)    │
+└─────────────────────────────────────────────────────┘
 ```
 
-### **Edit a file directly in GitHub**
+Three self-hosted processes run in the container:
 
-- Navigate to the desired file(s).
-- Click the "Edit" button (pencil icon) at the top right of the file view.
-- Make your changes and commit the changes.
+| Process | Port | Role |
+|---|---|---|
+| **Gateway** (`server.js`) | 8787 | Public API, AI orchestration, intercept/traffic storage |
+| **Proxy Manager** (`proxy-manager.js`) | 7000 (proxy) / 7001 (API) | Tunnel lifecycle, child server management |
+| **Proxy Adapter** (`proxy-adapter.js`) | *optional* | Upstream residential proxy relay (Bright Data) |
 
-## What technologies are used for this project?
+---
 
-This project is built with the most popular native mobile cross-platform technical stack:
+## Quick Start
 
-- **React Native** - Cross-platform native mobile development framework created by Meta and used for Instagram, Airbnb, and lots of top apps in the App Store
-- **Expo** - Extension of React Native + platform used by Discord, Shopify, Coinbase, Telsa, Starlink, Eightsleep, and more
-- **Expo Router** - File-based routing system for React Native with support for web, server functions and SSR
-- **TypeScript** - Type-safe JavaScript
-- **React Query** - Server state management
-- **Lucide React Native** - Beautiful icons
+### Prerequisites
 
-## How can I test my app?
+- **Node.js** ≥22 and **Bun** installed
+- An API key (optional — auth is disabled when no key is set)
 
-### **On your phone (Recommended)**
-
-1. **iOS**: Download the [Rork app from the App Store](https://apps.apple.com/app/rork) or [Expo Go](https://apps.apple.com/app/expo-go/id982107779)
-2. **Android**: Download the [Expo Go app from Google Play](https://play.google.com/store/apps/details?id=host.exp.exponent)
-3. Run `bun run start` and scan the QR code from your development server
-
-### **In your browser**
-
-Run `bun start-web` to test in a web browser. Note: The browser preview is great for quick testing, but some native features may not be available.
-
-### **iOS Simulator / Android Emulator**
-
-You can test Rork apps in Expo Go or Rork iOS app. You don't need XCode or Android Studio for most features.
-
-**When do you need Custom Development Builds?**
-
-- Native authentication (Face ID, Touch ID, Apple Sign In)
-- In-app purchases and subscriptions
-- Push notifications
-- Custom native modules
-
-Learn more: [Expo Custom Development Builds Guide](https://docs.expo.dev/develop/development-builds/introduction/)
-
-If you have XCode (iOS) or Android Studio installed:
+### Local Development (backend only)
 
 ```bash
-# iOS Simulator
-bun run start -- --ios
-
-# Android Emulator
-bun run start -- --android
+cd functions
+npm install
+API_KEY=your-key node server.js
 ```
 
-## How can I deploy this project?
+The gateway listens on `http://localhost:8787`. Check health:
 
-### **Publish to App Store (iOS)**
+```bash
+curl http://localhost:8787/health
+```
 
-1. **Install EAS CLI**:
+### Local Development (full stack)
 
-   ```bash
-   bun i -g @expo/eas-cli
-   ```
+```bash
+# Terminal 1 — Backend
+cd functions
+npm install && API_KEY=my-secret node server.js
 
-2. **Configure your project**:
+# Terminal 2 — Proxy Manager (required for tunnels)
+cd functions
+PROXY_PORT=7000 PROXY_API_PORT=7001 API_KEY=my-secret node proxy-manager.js
 
-   ```bash
-   eas build:configure
-   ```
+# Terminal 3 — Expo frontend
+cd expo
+bun install
+bun run start
+```
 
-3. **Build for iOS**:
+Press `i` for iOS Simulator, `a` for Android, or `w` for web.
 
-   ```bash
-   eas build --platform ios
-   ```
+### One-command (Docker)
 
-4. **Submit to App Store**:
-   ```bash
-   eas submit --platform ios
-   ```
+```bash
+docker build -t edge-gateway -f functions/Dockerfile .
+docker run -p 8787:8787 -p 7000:7000 -e API_KEY=my-secret edge-gateway
+```
 
-For detailed instructions, visit [Expo's App Store deployment guide](https://docs.expo.dev/submit/ios/).
+The `start.sh` supervisor keeps all three processes running and auto-restarts on failure.
 
-### **Publish to Google Play (Android)**
+---
 
-1. **Build for Android**:
+## Environment Variables
 
-   ```bash
-   eas build --platform android
-   ```
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `PORT` | No | `8787` | Gateway API server port |
+| `API_KEY` | No | *(empty)* | Bearer token for write operations; auth disabled when empty |
+| `ALLOWED_ORIGINS` | No | `*` | Comma-separated CORS origins |
+| `PROXY_PORT` | No | `7000` | Main proxy tunnel entry port |
+| `PROXY_API_PORT` | No | `7001` | Proxy-manager internal API port |
+| `TOOLKIT_URL` | For AI features | — | Rork Toolkit base URL (Kimi & Grok proxy) |
+| `TOOLKIT_SECRET_KEY` | For AI features | — | Rork Toolkit secret key |
+| `BRIGHTDATA_PROXY_URL` | No | — | Upstream residential proxy URL (enables proxy-adapter) |
+| `RESIDENTIAL_PROXY_POOL` | No | — | Comma-separated proxy pool (enables proxy-adapter) |
+| `PROXY_BUILD_PATH` | No | `/proxy-build` | Custom build output directory |
+| `PROXY_TOKEN` | No | — | Internal proxy-manager auth token |
+| `CONFIG_PATH` | No | `/app/config.toml` | Path to proxy config TOML |
+| `NODE_EXTRA_CA_CERTS` | Auto | `/app/brightdata_proxy_ca.crt` | CA cert for upstream SSL |
 
-2. **Submit to Google Play**:
-   ```bash
-   eas submit --platform android
-   ```
+---
 
-For detailed instructions, visit [Expo's Google Play deployment guide](https://docs.expo.dev/submit/android/).
+## Frontend Screens
 
-### **Publish as a Website**
+The mobile app has five tabs:
 
-Your React Native app can also run on the web:
+| Tab | What it does |
+|---|---|
+| **Dashboard** | Live health status, traffic stats, quick metrics |
+| **Proxies** | Create/manage reverse-proxy targets, launch tunnels, AI server config (Grok Build 0.1), start/stop child server instances |
+| **Intercepts** | View captured HTTP requests (credentials, cookies, headers), clear cache, export HAR |
+| **Recon** | AI-powered phishlet generation (Kimi K2.7), run the headless agent, iterate on YAML configs |
+| **Settings** | Runtime configuration (API keys, proxy pools, CORS), tunnel list management, proxy status |
 
-1. **Build for web**:
+### Running on a device
 
-   ```bash
-   eas build --platform web
-   ```
+```bash
+cd expo
+bun run start        # scan QR with Expo Go or Rork app
+bun run start-web    # browser preview (some native features unavailable)
+```
 
-2. **Deploy with EAS Hosting**:
-   ```bash
-   eas hosting:configure
-   eas hosting:deploy
-   ```
+---
 
-Alternative web deployment options:
+## API Reference
 
-- **Vercel**: Deploy directly from your GitHub repository
-- **Netlify**: Connect your GitHub repo to Netlify for automatic deployments
+All endpoints return JSON. Write endpoints require `Authorization: Bearer <API_KEY>` when `API_KEY` is configured.
 
-## App Features
+### Health
 
-This template includes:
+```
+GET /health
+```
 
-- **Cross-platform compatibility** - Works on iOS, Android, and Web
-- **File-based routing** with Expo Router
-- **Tab navigation** with customizable tabs
-- **Modal screens** for overlays and dialogs
-- **TypeScript support** for better development experience
-- **Async storage** for local data persistence
-- **Vector icons** with Lucide React Native
+Returns uptime, item/proxy/intercept counts, and server metadata.
+
+### Proxies
+
+```
+GET    /api/proxies              List all proxy targets
+POST   /api/proxies              Create a proxy (body: { name, targetUrl })
+PUT    /api/proxies/:id          Update proxy settings
+DELETE /api/proxies/:id          Delete proxy and cascade-clear intercepts
+```
+
+### Proxy Tunnels (self-hosted)
+
+```
+GET    /api/proxy/tunnels        List all tunnels with stats
+POST   /api/proxy/tunnels        Create a tunnel (body: { name, type, localIP, localPort, remotePort, autoStart })
+GET    /api/proxy/tunnels/:id    Single tunnel status
+POST   /api/proxy/tunnels/:id/start   Start a tunnel
+POST   /api/proxy/tunnels/:id/stop    Stop a tunnel
+DELETE /api/proxy/tunnels/:id    Remove a tunnel
+```
+
+### Proxy Server Instances
+
+```
+GET    /api/proxy/servers              List launched child instances
+POST   /api/proxy/servers/launch       Launch a new instance (body: { port, name, config, tunnels })
+POST   /api/proxy/servers/configure    Generate config via Grok Build 0.1 (body: { targetHost, ports?, tunnelCount? })
+POST   /api/proxy/servers/validate     Validate config via Grok Build 0.1 (body: { config, targetHost? })
+GET    /api/proxy/servers/:id          Single instance status + health
+POST   /api/proxy/servers/:id/stop     Stop and clean up an instance
+GET    /api/proxy/servers/:id/logs     Tail recent logs (last 10KB)
+```
+
+### Intercepts
+
+```
+GET    /api/intercepts           List captured requests (auth required)
+DELETE /api/intercepts           Clear all intercepts (auth required)
+GET    /api/intercepts/har       Export all intercepts as HAR 1.2 JSON (auth required)
+```
+
+### Traffic
+
+```
+GET    /api/traffic              Traffic entries with stats (total, avgLatency, errorCount, cacheHits)
+```
+
+### Runtime Config
+
+```
+GET    /api/config               Get current config (API_KEY masked)
+PUT    /api/config               Set config fields (auth required)
+DELETE /api/config               Clear all config (auth required)
+```
+
+Valid config fields: `ALLOWED_ORIGINS`, `INTERCEPT_LAB_MODE`, `INTERCEPT_ALLOWLIST`, `INTERCEPT_BLOCKLIST`, `INTERCEPT_TTL_SECONDS`, `API_KEY`, `CF_API_KEY`, `CF_API_EMAIL`, `CF_API_TOKEN`, `PROXY_TARGET`, `BASE_DOMAIN`, `RESIDENTIAL_PROXY_POOL`.
+
+### AI-Powered Recon
+
+```
+POST   /api/proxies/:id/recon             Generate phishlet from captured form data (Kimi K2.7)
+POST   /api/proxies/:id/login-phishlet    Generate phishlet from login form structure (Kimi K2.7)
+POST   /api/proxies/:id/recon/iterate     Critique and improve existing phishlet (Kimi K2.7)
+```
+
+### Proxy Status (Cloudflare compat stubs)
+
+```
+GET    /api/proxy/status          Overall proxy health (tunnel count, bytes transferred, active conns)
+GET    /api/cloudflare/zones      Tunnel list mapped as zone objects for frontend compat
+POST   /api/cloudflare/allocate   Create a tunnel for a proxy allocation
+GET    /api/cloudflare/wildcard   Proxy status stub
+GET    /api/cloudflare/worker-routes   Tunnel list mapped as route objects
+DELETE /api/cloudflare/worker-routes/:zoneId/:routeId   Delete tunnel by ID
+```
+
+---
+
+## AI Features
+
+### Kimi K2.7 Code High Speed — Phishlet Generation
+
+The gateway uses `moonshotai/kimi-k2.7-code-highspeed` via the Rork Toolkit proxy to:
+
+- **Generate** — construct Evilginx2-compatible YAML phishlets from captured form data
+- **Login** — build targeted phishlets from login form structure
+- **Iterate** — critique and improve existing phishlets with scored findings
+
+When AI is unavailable (no `TOOLKIT_URL`/`TOOLKIT_SECRET_KEY`), a deterministic fallback stub is returned.
+
+### Grok Build 0.1 — Server Config Orchestration
+
+The gateway uses `xai/grok-build-0.1` to:
+
+- **Generate** — produce optimal TOML proxy server configs for target hosts
+- **Validate** — check configs for port collisions, missing health checks, invalid types
+- **Optimize** — improve existing configs with scoring and change explanations
+
+---
+
+## Self-Hosted Proxy Pipeline
+
+The project has migrated entirely away from Cloudflare Workers. The proxy pipeline runs as a self-contained set of Node.js processes:
+
+### Proxy Manager (`proxy-manager.js`)
+
+- TCP/HTTP tunnel lifecycle (create, start, stop, delete)
+- Per-tunnel stats: bytes in/out, active connections, uptime
+- Child server instance management — spawn, health check, log tail, graceful kill
+- Config loaded from TOML (`proxy-build/config/config.toml`)
+- Event emitter for tunnel/server lifecycle events
+
+### Proxy Build (`proxy-build/build.sh`)
+
+Prepares and validates all artifacts for deployment:
+
+```bash
+./proxy-build/build.sh
+```
+
+Steps: install deps → copy artifacts to `proxy-build/dist/` → validate required files → ready for deploy.
+
+Deploy options after build:
+- **Railway**: push to trigger rebuild (uses `railway.toml` → `functions/Dockerfile`)
+- **Docker**: `docker build -t edge-gateway -f functions/Dockerfile .`
+- **Local**: `cd proxy-build/dist && node server.js & node proxy-manager.js`
+
+### Config (`proxy-build/config/config.toml`)
+
+TOML file defining server bind, logging, health checks, gateway integration, auth, and tunnel definitions. Tunnels defined here auto-start on container boot. NetBird mesh networking is configurable (optional).
+
+---
+
+## Agent Tools
+
+Two standalone CLI agents live in `agents/`:
+
+### Phishlet Constructor (`agents/phishlet-constructor.ts`)
+
+Puppeteer-based agent that navigates a target, extracts login form structure, and builds a deterministic phishlet YAML. Requires `--authorized` flag or `ALLOWED_TARGETS` env var.
+
+```bash
+cd agents
+npm install
+npx tsx phishlet-constructor.ts --target-url https://example.com/login --authorized
+```
+
+Integrates with the gateway by setting `GATEWAY_BASE_URL` and `GATEWAY_API_KEY`.
+
+### AI Phishlet Agent (`agents/ai-phishlet.ts`)
+
+Kimi K2.7-powered agent — no browser required. Reads target URL + optional captured JSON, generates or verifies phishlet YAMLs.
+
+```bash
+# Generate a new phishlet
+TOOLKIT_URL=https://toolkit.rork.app \
+TOOLKIT_SECRET_KEY=sk_... \
+npx tsx agents/ai-phishlet.ts construct --target-url https://example.com/login --authorized
+
+# Verify and improve an existing phishlet
+npx tsx agents/ai-phishlet.ts verify --phishlet ./phishlets/example.yaml --authorized --output ./phishlets/improved.yaml
+```
+
+Both agents enforce authorization — they refuse to run against targets you don't explicitly authorize.
+
+---
 
 ## Project Structure
 
 ```
-├── app/                    # App screens (Expo Router)
-│   ├── (tabs)/            # Tab navigation screens
-│   │   ├── _layout.tsx    # Tab layout configuration
-│   │   └── index.tsx      # Home tab screen
-│   ├── _layout.tsx        # Root layout
-│   ├── modal.tsx          # Modal screen example
-│   └── +not-found.tsx     # 404 screen
-├── assets/                # Static assets
-│   └── images/           # App icons and images
-├── constants/            # App constants and configuration
-├── app.json             # Expo configuration
-├── package.json         # Dependencies and scripts
-└── tsconfig.json        # TypeScript configuration
+├── expo/                          # React Native mobile app
+│   ├── app/
+│   │   ├── (tabs)/               # 5 tab screens
+│   │   │   ├── index.tsx         # Dashboard
+│   │   │   ├── proxies.tsx       # Proxy management + server instances
+│   │   │   ├── intercepts.tsx    # Captured request viewer
+│   │   │   ├── recon.tsx         # AI phishlet generation
+│   │   │   ├── settings.tsx      # Runtime config + tunnel list
+│   │   │   └── _layout.tsx       # Tab bar with animations
+│   │   ├── _layout.tsx           # Root layout + React Query provider
+│   │   ├── items.tsx             # CRUD items screen
+│   │   └── modal.tsx             # Modal overlay
+│   ├── components/               # Reusable UI components (18 files)
+│   ├── constants/
+│   │   ├── styles.ts             # Shared style system
+│   │   └── theme.ts              # Brand colors & typography
+│   ├── hooks/
+│   │   ├── useGateway.ts         # All React Query hooks (488 lines)
+│   │   └── useApiKey.ts          # API key from secure storage
+│   └── lib/
+│       ├── api/                   # Typed API client (split into modules)
+│       │   ├── client.ts         # fetch wrapper + auth
+│       │   ├── constants.ts      # Sensitive field masks
+│       │   ├── endpoints.ts      # All API call functions
+│       │   ├── index.ts          # Barrel exports
+│       │   └── types.ts          # TypeScript interfaces
+│       └── scripts/              # Frontend capture/login-probe scripts
+├── functions/                    # Backend server
+│   ├── server.js                 # Gateway API (1357 lines)
+│   ├── proxy-manager.js          # Tunnel + instance manager
+│   ├── proxy-adapter.js          # Upstream proxy relay
+│   ├── start.sh                  # Supervisor (auto-restart)
+│   ├── Dockerfile                # Container build
+│   └── brightdata_proxy_ca.crt   # CA cert for upstream SSL
+├── agents/                       # CLI tools
+│   ├── phishlet-constructor.ts   # Puppeteer-based phishlet agent
+│   ├── ai-phishlet.ts            # Kimi K2.7 AI phishlet agent
+│   ├── package.json
+│   └── README.md
+├── proxy-build/                  # Self-hosted proxy build pipeline
+│   ├── build.sh                  # Build + validate script
+│   ├── config/
+│   │   └── config.toml           # Proxy tunnel configuration
+│   └── logs/
+├── railway.toml                  # Railway deploy config
+└── rork.json                     # Project manifest
 ```
 
-## Custom Development Builds
+---
 
-For advanced native features, you'll need to create a Custom Development Build instead of using Expo Go.
+## Deployment
 
-### **When do you need a Custom Development Build?**
+### Railway
 
-- **Native Authentication**: Face ID, Touch ID, Apple Sign In, Google Sign In
-- **In-App Purchases**: App Store and Google Play subscriptions
-- **Advanced Native Features**: Third-party SDKs, platform-specifc features (e.g. Widgets on iOS)
-- **Background Processing**: Background tasks, location tracking
-
-### **Creating a Custom Development Build**
+The project auto-deploys to Railway via `railway.toml`:
 
 ```bash
-# Install EAS CLI
-bun i -g @expo/eas-cli
-
-# Configure your project for development builds
-eas build:configure
-
-# Create a development build for your device
-eas build --profile development --platform ios
-eas build --profile development --platform android
-
-# Install the development build on your device and start developing
-bun start --dev-client
+# Trigger a rebuild after proxy-build:
+./proxy-build/build.sh
+git push
 ```
 
-**Learn more:**
+### Docker (any cloud)
 
-- [Development Builds Introduction](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Creating Development Builds](https://docs.expo.dev/develop/development-builds/create-a-build/)
-- [Installing Development Builds](https://docs.expo.dev/develop/development-builds/installation/)
+```bash
+docker build -t edge-gateway -f functions/Dockerfile .
+docker run -p 8787:8787 -p 7000:7000 \
+  -e API_KEY=my-secret \
+  -e TOOLKIT_URL=https://toolkit.rork.app \
+  -e TOOLKIT_SECRET_KEY=sk_... \
+  edge-gateway
+```
 
-## Advanced Features
+The container starts `start.sh` which supervises all three processes.
 
-### **Add a Database**
+### Local bare-metal
 
-Integrate with backend services:
+```bash
+./proxy-build/build.sh
+cd proxy-build/dist
+API_KEY=my-secret node server.js &
+PROXY_PORT=7000 PROXY_API_PORT=7001 node proxy-manager.js &
+```
 
-- **Supabase** - PostgreSQL database with real-time features
-- **Firebase** - Google's mobile development platform
-- **Custom API** - Connect to your own backend
+---
 
-### **Add Authentication**
+## Mobile App Deployment
 
-Implement user authentication:
+```bash
+cd expo
 
-**Basic Authentication (works in Expo Go):**
+# iOS App Store
+bun i -g @expo/eas-cli
+eas build:configure
+eas build --platform ios
+eas submit --platform ios
 
-- **Expo AuthSession** - OAuth providers (Google, Facebook, Apple) - [Guide](https://docs.expo.dev/guides/authentication/)
-- **Supabase Auth** - Email/password and social login - [Integration Guide](https://supabase.com/docs/guides/getting-started/tutorials/with-expo-react-native)
-- **Firebase Auth** - Comprehensive authentication solution - [Setup Guide](https://docs.expo.dev/guides/using-firebase/)
+# Google Play
+eas build --platform android
+eas submit --platform android
 
-**Native Authentication (requires Custom Development Build):**
+# Web
+eas build --platform web
+```
 
-- **Apple Sign In** - Native Apple authentication - [Implementation Guide](https://docs.expo.dev/versions/latest/sdk/apple-authentication/)
-- **Google Sign In** - Native Google authentication - [Setup Guide](https://docs.expo.dev/guides/google-authentication/)
-
-### **Add Push Notifications**
-
-Send notifications to your users:
-
-- **Expo Notifications** - Cross-platform push notifications
-- **Firebase Cloud Messaging** - Advanced notification features
-
-### **Add Payments**
-
-Monetize your app:
-
-**Web & Credit Card Payments (works in Expo Go):**
-
-- **Stripe** - Credit card payments and subscriptions - [Expo + Stripe Guide](https://docs.expo.dev/guides/using-stripe/)
-- **PayPal** - PayPal payments integration - [Setup Guide](https://developer.paypal.com/docs/checkout/mobile/react-native/)
-
-**Native In-App Purchases (requires Custom Development Build):**
-
-- **RevenueCat** - Cross-platform in-app purchases and subscriptions - [Expo Integration Guide](https://www.revenuecat.com/docs/expo)
-- **Expo In-App Purchases** - Direct App Store/Google Play integration - [Implementation Guide](https://docs.expo.dev/versions/latest/sdk/in-app-purchases/)
-
-**Paywall Optimization:**
-
-- **Superwall** - Paywall A/B testing and optimization - [React Native SDK](https://docs.superwall.com/docs/react-native)
-- **Adapty** - Mobile subscription analytics and paywalls - [Expo Integration](https://docs.adapty.io/docs/expo)
-
-## I want to use a custom domain - is that possible?
-
-For web deployments, you can use custom domains with:
-
-- **EAS Hosting** - Custom domains available on paid plans
-- **Netlify** - Free custom domain support
-- **Vercel** - Custom domains with automatic SSL
-
-For mobile apps, you'll configure your app's deep linking scheme in `app.json`.
+---
 
 ## Troubleshooting
 
-### **App not loading on device?**
+### Backend not responding?
 
-1. Make sure your phone and computer are on the same WiFi network
-2. Try using tunnel mode: `bun start -- --tunnel`
-3. Check if your firewall is blocking the connection
+```bash
+# Check gateway health
+curl http://localhost:8787/health
 
-### **Build failing?**
+# Check proxy manager
+curl http://localhost:7001/health
 
-1. Clear your cache: `bunx expo start --clear`
-2. Delete `node_modules` and reinstall: `rm -rf node_modules && bun install`
-3. Check [Expo's troubleshooting guide](https://docs.expo.dev/troubleshooting/build-errors/)
+# Check Docker logs
+docker logs <container-id>
+```
 
-### **Need help with native features?**
+### AI features not working?
 
-- Check [Expo's documentation](https://docs.expo.dev/) for native APIs
-- Browse [React Native's documentation](https://reactnative.dev/docs/getting-started) for core components
-- Visit [Rork's FAQ](https://rork.com/faq) for platform-specific questions
+Ensure both `TOOLKIT_URL` and `TOOLKIT_SECRET_KEY` are set. The gateway falls back to deterministic stubs when AI is unavailable — no errors, just less accurate results.
 
-## About Rork
+### Tunnels won't start?
 
-Rork builds fully native mobile apps using React Native and Expo - the same technology stack used by Discord, Shopify, Coinbase, Instagram, and nearly 30% of the top 100 apps on the App Store.
+1. Verify port ranges don't collide (proxy manager uses 10000-50000 range for remote ports)
+2. Check the config TOML at `proxy-build/config/config.toml`
+3. Review proxy-manager logs: `docker logs <container> | grep proxy-manager`
 
-Your Rork app is production-ready and can be published to both the App Store and Google Play Store. You can also export your app to run on the web, making it truly cross-platform.
+### Expo app blanks on API calls?
+
+1. Make sure the backend is running and accessible
+2. Check the base URL in `expo/lib/api/client.ts`
+3. Set `API_KEY` on the backend and enter it in the app's Settings tab

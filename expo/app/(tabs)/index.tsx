@@ -118,17 +118,17 @@ export default function DashboardScreen() {
   const statusLabel = health.isError ? "UNREACHABLE" : healthy ? "OPERATIONAL" : "CONNECTING";
 
   const gateStats = useMemo(() => [
-    { icon: Zap, label: "Latency", value: health.data ? `${health.data.meta.latencyMs}ms` : "—", accent: theme.colors.accent },
-    { icon: Gauge, label: "Edge", value: health.data?.meta.edgeLatency ?? "—", accent: theme.colors.cyan },
-    { icon: Clock, label: "Uptime", value: health.data ? formatUptime(health.data.uptime) : "—", accent: theme.colors.ok },
-    { icon: Activity, label: "Rate", value: health.data?.meta.rateRemaining != null && health.data?.meta.rateLimit != null ? `${health.data.meta.rateRemaining}/${health.data.meta.rateLimit}` : "—", accent: theme.colors.warn },
+    { icon: Zap, label: "Latency", value: health.data?.meta?.latencyMs != null ? `${health.data.meta.latencyMs}ms` : "—", accent: theme.colors.accent },
+    { icon: Gauge, label: "Edge", value: health.data?.meta?.edgeLatency ?? "—", accent: theme.colors.cyan },
+    { icon: Clock, label: "Uptime", value: health.data?.uptime != null ? formatUptime(health.data.uptime) : "—", accent: theme.colors.ok },
+    { icon: Activity, label: "Rate", value: health.data?.meta?.rateRemaining != null && health.data?.meta?.rateLimit != null ? `${health.data.meta.rateRemaining}/${health.data.meta.rateLimit}` : "—", accent: theme.colors.warn },
   ], [health.data]);
 
   const trafficStats = useMemo(() => [
-    { icon: Database, label: "Requests", value: traffic.data ? String(traffic.data.stats.total) : "—", accent: theme.colors.accent },
-    { icon: Timer, label: "Avg latency", value: traffic.data ? `${traffic.data.stats.avgLatency}ms` : "—", accent: theme.colors.cyan },
-    { icon: Zap, label: "Cache hits", value: traffic.data ? String(traffic.data.stats.cacheHits) : "—", accent: theme.colors.ok },
-    { icon: AlertTriangle, label: "Errors", value: traffic.data ? String(traffic.data.stats.errorCount) : "—", accent: theme.colors.danger },
+    { icon: Database, label: "Requests", value: traffic.data?.stats?.total != null ? String(traffic.data.stats.total) : "—", accent: theme.colors.accent },
+    { icon: Timer, label: "Avg latency", value: traffic.data?.stats?.avgLatency != null ? `${traffic.data.stats.avgLatency}ms` : "—", accent: theme.colors.cyan },
+    { icon: Zap, label: "Cache hits", value: traffic.data?.stats?.cacheHits != null ? String(traffic.data.stats.cacheHits) : "—", accent: theme.colors.ok },
+    { icon: AlertTriangle, label: "Errors", value: traffic.data?.stats?.errorCount != null ? String(traffic.data.stats.errorCount) : "—", accent: theme.colors.danger },
   ], [traffic.data]);
 
   const trafficEntries = traffic.data?.entries ?? [];
