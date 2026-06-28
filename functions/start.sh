@@ -62,12 +62,12 @@ start_service gateway node /app/server.js &
 # --- Health gate: wait for gateway to be ready --------------------------------
 echo "[start] waiting for gateway health on http://127.0.0.1:${HEALTH_PORT}/health"
 for i in $(seq 1 60); do
-  OUTPUT=$(curl -sv "http://127.0.0.1:${HEALTH_PORT}/health" 2>&1)
-  if echo "$OUTPUT" | grep -qE "HTTP/[0-9.]+ 200|< HTTP/[0-9]+ 200"; then
-    echo "[start] gateway is healthy"
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 3 "http://127.0.0.1:${HEALTH_PORT}/health" 2>/dev/null || echo "000")
+  if [ "$STATUS" = "200" ]; then
+    echo "[start] gateway is healthy (HTTP $STATUS)"
     break
   fi
-  echo "[start] health check failed: $OUTPUT"
+  echo "[start] health check attempt $i/60 — got HTTP $STATUS"
   if [ "$i" -eq 60 ]; then
     echo "[start] gateway failed to become healthy after 60s; aborting"
     exit 1
@@ -79,8 +79,9 @@ done
 echo "[start] entering health watch loop"
 while true; do
   sleep 10
-  if ! curl -sf "http://127.0.0.1:${HEALTH_PORT}/health" > /dev/null 2>&1; then
-    echo "[start] gateway health check failed; restarting gateway"
+  STATUS=$(curl -s -o /dev/null -w "%{http_code}" --max-time 5 "http://127.0.0.1:${HEALTH_PORT}/health" 2>/dev/null || echo "000")
+  if [ "$STATUS" != "200" ]; then
+    echo "[start] gateway health check failed (HTTP $STATUS); restarting gateway"
     if [ -f /tmp/gateway.pid ]; then
       kill "$(cat /tmp/gateway.pid)" 2>/dev/null || true
     fi
