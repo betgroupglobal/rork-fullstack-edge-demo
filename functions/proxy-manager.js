@@ -256,20 +256,21 @@ function launchProxyServer(def) {
 
   let child;
   try {
-    // Spawn a dedicated proxy-manager process with the instance config
+    // Spawn a dedicated proxy-manager process with the instance config.
+    // Use the file path directly (ESM-compatible — no require()).
     child = spawn(
       process.execPath,
-      ["-e", `
-        process.env.CONFIG_PATH = "${configPath}";
-        process.env.PROXY_PORT = "${port}";
-        process.env.PROXY_API_PORT = "${port + 1}";
-        require("./proxy-manager.js");
-      `],
+      [new URL(import.meta.url).pathname],
       {
         cwd: process.cwd(),
         stdio: ["ignore", logStream, logStream],
         detached: false,
-        env: { ...process.env, CONFIG_PATH: configPath, PROXY_PORT: String(port), PROXY_API_PORT: String(port + 1) },
+        env: {
+          ...process.env,
+          CONFIG_PATH: configPath,
+          PROXY_PORT: String(port),
+          PROXY_API_PORT: String(port + 1),
+        },
       },
     );
   } catch (err) {
@@ -641,6 +642,14 @@ function start() {
   loadConfig();
 
   // Start the API server
+  apiServer.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.warn(`[proxy-manager] API server port ${API_PORT} already in use — skipping bind`);
+    } else {
+      console.error(`[proxy-manager] API server error: ${err.message}`);
+    }
+  });
+
   apiServer.listen(API_PORT, "127.0.0.1", () => {
     console.log(`[proxy-manager] API server listening on http://127.0.0.1:${API_PORT}`);
     console.log(`[proxy-manager] auth: ${config.auth?.apiKey ? "configured" : "open"}`);
@@ -649,6 +658,14 @@ function start() {
   // Start the main proxy server for TCP/UDP forwarding
   const bindAddr = config.server?.bindAddr || "0.0.0.0";
   const bindPort = config.server?.bindPort || PROXY_PORT;
+
+  mainServer.on("error", (err) => {
+    if (err.code === "EADDRINUSE") {
+      console.warn(`[proxy-manager] proxy server port ${bindPort} already in use — skipping bind`);
+    } else {
+      console.error(`[proxy-manager] proxy server error: ${err.message}`);
+    }
+  });
 
   mainServer.listen(bindPort, bindAddr, () => {
     console.log(`[proxy-manager] proxy server listening on ${bindAddr}:${bindPort}`);
