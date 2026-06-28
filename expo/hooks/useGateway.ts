@@ -77,26 +77,13 @@ export const queryKeys = {
   servers: ["proxy-servers"] as const,
 };
 
-/** Centralised refetch intervals (ms) so changes propagate across all screens. */
-export const REFETCH_INTERVALS = {
-  health: 5_000,
-  traffic: 4_000,
-  proxies: 6_000,
-  intercepts: 3_000,
-  tunnels: 8_000,
-  proxyStatus: 10_000,
-  servers: 8_000,
-} as const;
-
 // ── Health ──
 
 export function useHealth(): UseQueryResult<HealthResult, Error> {
   return useQuery({
     queryKey: queryKeys.health,
     queryFn: fetchHealth,
-    refetchInterval: REFETCH_INTERVALS.health,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
+    staleTime: Infinity,
     retry: 1,
   });
 }
@@ -152,9 +139,7 @@ export function useProxies(): UseQueryResult<Proxy[], Error> {
   return useQuery({
     queryKey: queryKeys.proxies,
     queryFn: fetchProxies,
-    refetchInterval: REFETCH_INTERVALS.proxies,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
+    staleTime: Infinity,
     retry: 1,
   });
 }
@@ -201,9 +186,7 @@ export function useProxyStatus(): UseQueryResult<ProxyStatus, Error> {
   return useQuery({
     queryKey: queryKeys.proxyStatus,
     queryFn: fetchProxyStatus,
-    refetchInterval: REFETCH_INTERVALS.proxyStatus,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
+    staleTime: Infinity,
     retry: 1,
   });
 }
@@ -212,9 +195,7 @@ export function useTunnels(): UseQueryResult<TunnelListResult, Error> {
   return useQuery({
     queryKey: queryKeys.tunnels,
     queryFn: fetchTunnels,
-    refetchInterval: REFETCH_INTERVALS.tunnels,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
+    staleTime: Infinity,
     retry: 1,
   });
 }
@@ -291,9 +272,7 @@ export function useTraffic(): UseQueryResult<TrafficResult, Error> {
   return useQuery({
     queryKey: queryKeys.traffic,
     queryFn: fetchTraffic,
-    refetchInterval: REFETCH_INTERVALS.traffic,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
+    staleTime: Infinity,
     retry: 1,
   });
 }
@@ -304,9 +283,7 @@ export function useIntercepts(authHeader?: string): UseQueryResult<InterceptCapt
   return useQuery({
     queryKey: [...queryKeys.intercepts, authHeader],
     queryFn: () => fetchIntercepts(authHeader),
-    refetchInterval: REFETCH_INTERVALS.intercepts,
-    refetchOnWindowFocus: true,
-    refetchIntervalInBackground: false,
+    staleTime: Infinity,
     retry: 1,
   });
 }
@@ -406,9 +383,7 @@ export function useServers(): UseQueryResult<ServerListResult, Error> {
   return useQuery({
     queryKey: queryKeys.servers,
     queryFn: fetchServers,
-    refetchInterval: REFETCH_INTERVALS.servers,
-    refetchIntervalInBackground: false,
-    refetchOnWindowFocus: true,
+    staleTime: Infinity,
     retry: 1,
   });
 }
@@ -418,7 +393,7 @@ export function useFetchServer(id: number): UseQueryResult<ProxyServerInstance, 
     queryKey: [...queryKeys.servers, id],
     queryFn: () => fetchServer(id),
     enabled: id > 0,
-    refetchInterval: REFETCH_INTERVALS.servers,
+    staleTime: Infinity,
     retry: 1,
   });
 }

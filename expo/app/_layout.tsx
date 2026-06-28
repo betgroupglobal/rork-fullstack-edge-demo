@@ -7,10 +7,17 @@ import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { SafeAreaProvider } from "react-native-safe-area-context";
 
 import { theme } from "@/constants/theme";
+import { useWebSocket } from "@/hooks/useWebSocket";
 
 SplashScreen.preventAutoHideAsync();
 
 const queryClient = new QueryClient();
+
+/** Bridges the WebSocket hook into the QueryClientProvider tree. */
+function WebSocketBridge() {
+  useWebSocket();
+  return null;
+}
 
 function RootLayoutNav() {
   useEffect(() => {
@@ -34,6 +41,7 @@ function RootLayoutNav() {
 export default function RootLayout() {
   return (
     <QueryClientProvider client={queryClient}>
+      <WebSocketBridge />
       <SafeAreaProvider>
         <GestureHandlerRootView style={{ flex: 1, backgroundColor: theme.colors.bg }}>
           <StatusBar style="light" />
