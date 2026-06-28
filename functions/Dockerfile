@@ -2,13 +2,18 @@ FROM node:22-slim
 
 # ── Self-hosted proxy pipeline (Pangolin/frp/NetBird — no Cloudflare deps) ──
 ARG BUILD_PATH=/proxy-build
+ARG BUILDTIME=unknown
 ENV PROXY_BUILD_PATH=${BUILD_PATH}
+# Prevent curl/wget from routing loopback traffic through BrightData proxy
+ENV no_proxy="127.0.0.1,localhost,::1"
+ENV NO_PROXY="127.0.0.1,localhost,::1"
 WORKDIR /app
 
 # Copy source from functions/ (repo root build context)
 COPY functions/package*.json ./
 
 # Install production dependencies
+RUN apt-get update && apt-get install -y curl && rm -rf /var/lib/apt/lists/*
 RUN npm install --production --no-audit --no-fund
 
 # Copy source files
