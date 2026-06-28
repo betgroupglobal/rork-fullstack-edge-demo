@@ -1,0 +1,74 @@
+diff --git a/metro/transformer.js b/metro/transformer.js
+index 45a51facec585129401d63ebd1df8ca24abc0f2b..2a43cf0a57245c320d9caf4531514c3a9ab432d5 100644
+--- a/metro/transformer.js
++++ b/metro/transformer.js
+@@ -12,26 +12,45 @@ const upstreamTransformer = require("@expo/metro-config/babel-transformer");
+  * Detects the Expo SDK version from the installed expo package
+  * This approach works with all package managers (npm, yarn, pnpm)
+  */
++function classifyExpoVersion(version) {
++  if (!version) return null;
++  if (version.startsWith("54.")) return "54";
++  if (version.startsWith("53.")) return "53";
++  return null;
++}
++
+ function detectExpoVersion() {
++  // Walk up from cwd looking for node_modules/expo. In monorepo/workspace
++  // layouts the app runs from a subfolder while expo is hoisted to the repo
++  // root, so checking only process.cwd()/node_modules/expo fails and the
++  // detection wrongly falls through to the v53 default.
+   try {
+-    // Read version from installed expo package (works with pnpm, npm, yarn)
+-    const expoPackagePath = path.join(
+-      process.cwd(),
+-      "node_modules",
+-      "expo",
+-      "package.json",
+-    );
+-    if (fs.existsSync(expoPackagePath)) {
+-      const expoPackage = JSON.parse(fs.readFileSync(expoPackagePath, "utf8"));
+-      const version = expoPackage.version;
+-      if (version) {
+-        if (version.startsWith("54.")) return "54";
+-        if (version.startsWith("53.")) return "53";
++    let dir = process.cwd();
++    for (let i = 0; i < 12; i++) {
++      const expoPackagePath = path.join(dir, "node_modules", "expo", "package.json");
++      if (fs.existsSync(expoPackagePath)) {
++        const expoPackage = JSON.parse(fs.readFileSync(expoPackagePath, "utf8"));
++        const result = classifyExpoVersion(expoPackage.version);
++        if (result) return result;
+       }
++      const parent = path.dirname(dir);
++      if (parent === dir) break;
++      dir = parent;
+     }
+   } catch {
+     // Ignore parsing errors
+   }
++  // Fallback: let Node resolution find expo from the current working dir.
++  try {
++    const resolved = require.resolve("expo/package.json", {
++      paths: [process.cwd()],
++    });
++    const expoPackage = JSON.parse(fs.readFileSync(resolved, "utf8"));
++    const result = classifyExpoVersion(expoPackage.version);
++    if (result) return result;
++  } catch {
++    // Ignore resolution errors
++  }
+   return null;
+ }
+ 
+@@ -70,8 +89,8 @@ function wrapLayoutWithProviders(src, environment) {
+ 
+   // Add RorkDevWrapper for development environment
+   if (environment === "development") {
+-    // Detect Expo SDK version - default to v53 if not detected
+-    const version = detectExpoVersion() || "53";
++    // Detect Expo SDK version - default to v54 (current Expo SDK) if not detected
++    const version = detectExpoVersion() || "54";
+     const devImport =
+       version === "54"
+         ? "import { RorkDevWrapper } from '@rork-ai/toolkit-sdk/v54';"

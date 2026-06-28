@@ -9,5 +9,8 @@
     "@expo/cli": "^56.1.16",
     "rork": "^1.0.1",
     "wrangler": "^4.101.0"
+  },
+  "patchedDependencies": {
+    "@rork-ai/toolkit-sdk@0.2.54": "patches/@rork-ai%2Ftoolkit-sdk@0.2.54.patch"
   }
 }
