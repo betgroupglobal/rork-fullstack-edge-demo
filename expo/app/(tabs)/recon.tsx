@@ -1,10 +1,9 @@
 import { LinearGradient } from "expo-linear-gradient";
 import * as Clipboard from "expo-clipboard";
-import { Check, Copy, ExternalLink, Fingerprint, Globe, Loader, Radar, RefreshCw, Scroll, Server, Shield, Wand2, Zap } from "lucide-react-native";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Check, Copy, ExternalLink, Fingerprint, Globe, Loader, Radar, RefreshCw, Server, Shield, Wand2 } from "lucide-react-native";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   ActivityIndicator,
-  Platform,
   Pressable,
   ScrollView,
   StyleSheet,
@@ -15,9 +14,12 @@ import {
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import WebView from "@/components/WebView";
 
+import MiniMetric from "@/components/MiniMetric";
 import OfflineCard from "@/components/OfflineCard";
 import PressableScale from "@/components/PressableScale";
 import PulseDot from "@/components/PulseDot";
+import EmptyState from "@/components/EmptyState";
+import { layout, card, type as typeStyles, form, list } from "@/constants/styles";
 import { theme } from "@/constants/theme";
 import { useApiKey } from "@/hooks/useApiKey";
 import { useGenerateLoginPhishlet, useGeneratePhishlet, useIteratePhishlet, useProxies } from "@/hooks/useGateway";
@@ -27,7 +29,6 @@ import { CAPTURE_SCRIPT } from "@/lib/scripts/capture";
 import { LOGIN_PROBE_SCRIPT } from "@/lib/scripts/login-probe";
 import { mergeCaptureMessage, mapCapturedData } from "@/lib/scripts/mapCapturedData";
 
-// ── Pipeline stage enum ──
 type Stage = "idle" | "scanning" | "generating" | "iterating" | "done";
 
 export default function ReconScreen() {
@@ -48,7 +49,6 @@ export default function ReconScreen() {
   const [iterateResult, setIterateResult] = useState<{ critiques: CritiqueEntry[]; improvements: string[]; passes: number; score: number } | null>(null);
   const [copiedField, setCopiedField] = useState<string | null>(null);
 
-  // Login-phishlet mode (PhishletGen-Automator)
   const [loginMode, setLoginMode] = useState(false);
   const [loginUrl, setLoginUrl] = useState<string>("");
   const [loginYaml, setLoginYaml] = useState<string>("");
@@ -65,8 +65,7 @@ export default function ReconScreen() {
       const url = new URL(loginUrl.trim());
       if (url.protocol !== "http:" && url.protocol !== "https:") return "";
     } catch { return ""; }
-    return `cd /Users/adminuser/rork-fullstack-edge-demo-1 && \\
-GATEWAY_BASE_URL=${getBaseUrl()} \\
+    return `GATEWAY_BASE_URL=${getBaseUrl()} \\
 GATEWAY_API_KEY=$GATEWAY_API_KEY \\
 PROXY_ID=${selected.id} \\
 npx tsx agents/phishlet-constructor.ts \\
@@ -74,14 +73,12 @@ npx tsx agents/phishlet-constructor.ts \\
   --authorized`;
   }, [selected, loginUrl]);
 
-  // Auto-select proxy if only one exists
   useEffect(() => {
     if (proxies.length === 1 && !selectedSlug) {
       setSelectedSlug(proxies[0].slug);
     }
   }, [proxies, selectedSlug]);
 
-  // ── One-tap scan: launch browser + start the pipeline ──
   const runScan = useCallback(() => {
     if (!selected) return;
     setCaptured({});
@@ -91,12 +88,10 @@ npx tsx agents/phishlet-constructor.ts \\
     setLoginMode(false);
     setLoginYaml("");
     setStage("scanning");
-    const url = proxyUrl(selected.slug);
-    setActiveUrl(url);
+    setActiveUrl(proxyUrl(selected.slug));
     setWebviewKey((k) => k + 1);
   }, [selected]);
 
-  // ── PhishletGen-Automator: scan a direct URL for its login form ──
   const runLoginScan = useCallback(() => {
     if (!selected || !loginUrl.trim()) return;
     try {
@@ -113,7 +108,6 @@ npx tsx agents/phishlet-constructor.ts \\
     setWebviewKey((k) => k + 1);
   }, [selected, loginUrl]);
 
-  // Auto-generate login phishlet when the focused probe reports a form.
   useEffect(() => {
     if (loginMode && captured.loginForm && !generateLogin.isPending && !loginYaml) {
       const form = captured.loginForm as Record<string, unknown>;
@@ -137,7 +131,6 @@ npx tsx agents/phishlet-constructor.ts \\
     }
   }, [loginMode, captured, generateLogin, loginYaml, activeUrl, loginUrl, selected]);
 
-  // ── WebView message handler ──
   const onMessage = useCallback((event: { nativeEvent: { data?: string | Record<string, unknown> } }) => {
     try {
       const raw = event.nativeEvent.data;
@@ -148,7 +141,6 @@ npx tsx agents/phishlet-constructor.ts \\
     } catch { /* ignore */ }
   }, []);
 
-  // ── Auto-trigger generation when we have enough captured data ──
   const hasCaptureData = useMemo(() => {
     const fields = (captured.formFields as unknown[]) ?? [];
     return fields.length > 0 || captured.pageTitle != null;
@@ -165,7 +157,6 @@ npx tsx agents/phishlet-constructor.ts \\
     }
   }, [stage, hasCaptureData, captured, generate, generated, selected]);
 
-  // ── Auto-trigger iteration after generation ──
   useEffect(() => {
     if (stage === "generating" && generated && !iterate.isPending && !refinedYaml) {
       setStage("iterating");
@@ -207,11 +198,8 @@ npx tsx agents/phishlet-constructor.ts \\
   };
 
   const stageLabel: Record<Stage, string> = {
-    idle: "",
-    scanning: "Scanning target — browse the login page…",
-    generating: "Generating phishlet YAML…",
-    iterating: "Self-critique & refining…",
-    done: "Scan complete",
+    idle: "", scanning: "Scanning target — browse the login page…",
+    generating: "Generating phishlet YAML…", iterating: "Self-critique & refining…", done: "Scan complete",
   };
   const stageIcon: Record<Stage, React.ElementType | null> = {
     idle: null, scanning: Radar, generating: Wand2, iterating: RefreshCw, done: Check,
@@ -222,23 +210,13 @@ npx tsx agents/phishlet-constructor.ts \\
   };
 
   return (
-    <View style={styles.root}>
-      <LinearGradient
-        colors={[theme.colors.accentGlow, "transparent"]}
-        start={{ x: 0.1, y: 0 }}
-        end={{ x: 0.9, y: 0.5 }}
-        style={styles.glow}
-        pointerEvents="none"
-      />
-      <ScrollView
-        contentContainerStyle={[styles.content, { paddingTop: insets.top + theme.spacing(6) }]}
-        showsVerticalScrollIndicator={false}
-      >
-        {/* Header */}
+    <View style={layout.root}>
+      <LinearGradient colors={[theme.colors.accentGlow, "transparent"]} start={{ x: 0.1, y: 0 }} end={{ x: 0.9, y: 0.5 }} style={layout.glow} pointerEvents="none" />
+      <ScrollView contentContainerStyle={[layout.content, { paddingTop: insets.top + theme.spacing(6) }]} showsVerticalScrollIndicator={false}>
         <View>
-          <Text style={styles.eyebrow}>RECONNAISSANCE</Text>
-          <Text style={styles.hero}>Phishlet generator</Text>
-          <Text style={styles.sub}>
+          <Text style={typeStyles.eyebrow}>RECONNAISSANCE</Text>
+          <Text style={typeStyles.hero}>Phishlet generator</Text>
+          <Text style={typeStyles.sub}>
             One tap to scan a target, capture its login flow, and auto-generate a refined YAML phishlet with multi-pass validation.
           </Text>
         </View>
@@ -248,16 +226,16 @@ npx tsx agents/phishlet-constructor.ts \\
         ) : isError ? (
           <OfflineCard message="Could not load proxy targets." onRetry={() => refetch()} />
         ) : proxies.length === 0 ? (
-          <View style={styles.stateCard}>
-            <Radar size={28} color={theme.colors.textFaint} />
-            <Text style={styles.stateText}>Create a proxy target first to run reconnaissance.</Text>
-          </View>
+          <EmptyState
+            icon={<Radar size={26} color={theme.colors.accent} />}
+            title="No proxy targets"
+            subtitle="Create a proxy target first to run reconnaissance."
+          />
         ) : (
           <>
-            {/* Target selector + scan button in one row */}
-            <View style={styles.controlCard}>
+            <View style={card.surface}>
               <View style={styles.controlTop}>
-                <Text style={styles.controlLabel}>TARGET</Text>
+                <Text style={form.label}>TARGET</Text>
                 <View style={styles.proxyChips}>
                   {proxies.map((p) => (
                     <Pressable
@@ -275,24 +253,13 @@ npx tsx agents/phishlet-constructor.ts \\
               </View>
               {selected && (
                 <PressableScale
-                  haptic="heavy"
-                  onPress={runScan}
-                  disabled={stage !== "idle" && stage !== "done"}
-                  style={[
-                    styles.scanBtn,
-                    stage !== "idle" && stage !== "done" && styles.scanBtnBusy,
-                  ]}
+                  haptic="heavy" onPress={runScan} disabled={stage !== "idle" && stage !== "done"}
+                  style={[form.submitBtn, stage !== "idle" && stage !== "done" && { opacity: 0.7 }]}
                 >
                   {stage === "idle" || stage === "done" ? (
-                    <>
-                      <Radar size={16} color={theme.colors.bg} />
-                      <Text style={styles.scanBtnText}>{stage === "done" ? "Rescan" : "Run scan"}</Text>
-                    </>
+                    <><Radar size={16} color={theme.colors.bg} /><Text style={form.submitText}>{stage === "done" ? "Rescan" : "Run scan"}</Text></>
                   ) : (
-                    <>
-                      <Loader size={16} color={theme.colors.bg} />
-                      <Text style={styles.scanBtnText}>{stageLabel[stage]}</Text>
-                    </>
+                    <><Loader size={16} color={theme.colors.bg} /><Text style={form.submitText}>{stageLabel[stage]}</Text></>
                   )}
                 </PressableScale>
               )}
@@ -300,57 +267,33 @@ npx tsx agents/phishlet-constructor.ts \\
 
             {/* Login Phishlet Automator */}
             {selected && (
-              <View style={[styles.controlCard, styles.loginCard]}>
-                <Text style={styles.controlLabel}>LOGIN PHISHLET AUTOMATOR</Text>
+              <View style={[card.surface, { gap: theme.spacing(3) }]}>
+                <Text style={form.label}>LOGIN PHISHLET AUTOMATOR</Text>
                 <View style={styles.loginRow}>
                   <TextInput
-                    value={loginUrl}
-                    onChangeText={setLoginUrl}
-                    placeholder="https://target.com/login"
-                    placeholderTextColor={theme.colors.textFaint}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                    keyboardType="url"
-                    style={styles.loginInput}
+                    value={loginUrl} onChangeText={setLoginUrl}
+                    placeholder="https://target.com/login" placeholderTextColor={theme.colors.textFaint}
+                    autoCapitalize="none" autoCorrect={false} keyboardType="url"
+                    style={[form.input, { flex: 1 }]}
                   />
                   <PressableScale
-                    haptic="medium"
-                    onPress={runLoginScan}
+                    haptic="medium" onPress={runLoginScan}
                     disabled={!loginUrl.trim() || generateLogin.isPending}
-                    style={[
-                      styles.loginBtn,
-                      (!loginUrl.trim() || generateLogin.isPending) && styles.loginBtnDisabled,
-                    ]}
+                    style={[form.submitBtn, { paddingHorizontal: theme.spacing(4), paddingVertical: theme.spacing(2.5), marginTop: 0 }, (!loginUrl.trim() || generateLogin.isPending) && { opacity: 0.5 }]}
                   >
-                    {generateLogin.isPending ? (
-                      <Loader size={14} color={theme.colors.bg} />
-                    ) : (
-                      <>
-                        <Fingerprint size={14} color={theme.colors.bg} />
-                        <Text style={styles.loginBtnText}>Generate</Text>
-                      </>
-                    )}
+                    {generateLogin.isPending ? <Loader size={14} color={theme.colors.bg} /> : <><Fingerprint size={14} color={theme.colors.bg} /><Text style={form.submitText}>Generate</Text></>}
                   </PressableScale>
                 </View>
-
                 {loginYaml ? (
                   <View style={styles.loginYamlCard}>
                     <View style={styles.loginYamlHeader}>
                       <Text style={styles.loginYamlTitle}>Generated YAML</Text>
                       <Pressable onPress={() => copy(loginYaml, "loginYaml")} style={styles.copyBtn}>
-                        {copiedField === "loginYaml" ? (
-                          <Check size={14} color={theme.colors.ok} />
-                        ) : (
-                          <Copy size={14} color={theme.colors.cyan} />
-                        )}
+                        {copiedField === "loginYaml" ? <Check size={14} color={theme.colors.ok} /> : <Copy size={14} color={theme.colors.cyan} />}
                       </Pressable>
                     </View>
-                    <Text style={styles.loginYamlApplied}>
-                      Applied to proxy: {selected?.name || selected?.slug}
-                    </Text>
-                    <Text style={styles.loginYaml} numberOfLines={12} ellipsizeMode="tail">
-                      {loginYaml}
-                    </Text>
+                    <Text style={styles.loginYamlApplied}>Applied to proxy: {selected?.name || selected?.slug}</Text>
+                    <Text style={styles.loginYaml} numberOfLines={12} ellipsizeMode="tail">{loginYaml}</Text>
                   </View>
                 ) : loginMode && !captured.loginForm ? (
                   <View style={styles.loginStatus}>
@@ -361,68 +304,44 @@ npx tsx agents/phishlet-constructor.ts \\
               </View>
             )}
 
-            {/* Headless Agent workflow */}
+            {/* Headless Agent */}
             {selected && (
-              <View style={[styles.controlCard, styles.agentCard]}>
-                <Text style={styles.controlLabel}>HEADLESS AGENT</Text>
-                <Text style={styles.agentSub}>
-                  Run the Puppeteer agent locally and have it upload the result back to this proxy.
-                </Text>
-                <PressableScale
-                  haptic="medium"
-                  onPress={() => setShowAgentCommand((s) => !s)}
-                  disabled={!agentCommand}
-                  style={[styles.agentToggle, !agentCommand && styles.agentToggleDisabled]}
-                >
+              <View style={[card.surface, { gap: theme.spacing(3) }]}>
+                <Text style={form.label}>HEADLESS AGENT</Text>
+                <Text style={typeStyles.sub}>Run the Puppeteer agent locally and have it upload the result back to this proxy.</Text>
+                <PressableScale haptic="medium" onPress={() => setShowAgentCommand((s) => !s)} disabled={!agentCommand} style={[styles.agentToggle, !agentCommand && { opacity: 0.5 }]}>
                   <Server size={14} color={theme.colors.bg} />
-                  <Text style={styles.agentToggleText}>
-                    {showAgentCommand ? "Hide command" : "Show command"}
-                  </Text>
+                  <Text style={styles.agentToggleText}>{showAgentCommand ? "Hide command" : "Show command"}</Text>
                 </PressableScale>
-
                 {showAgentCommand && agentCommand ? (
                   <View style={styles.agentCommandCard}>
                     <View style={styles.loginYamlHeader}>
                       <Text style={styles.loginYamlTitle}>Terminal command</Text>
                       <Pressable onPress={() => copy(agentCommand, "agentCommand")} style={styles.copyBtn}>
-                        {copiedField === "agentCommand" ? (
-                          <Check size={14} color={theme.colors.ok} />
-                        ) : (
-                          <Copy size={14} color={theme.colors.cyan} />
-                        )}
+                        {copiedField === "agentCommand" ? <Check size={14} color={theme.colors.ok} /> : <Copy size={14} color={theme.colors.cyan} />}
                       </Pressable>
                     </View>
                     <Text style={styles.agentCommand}>{agentCommand}</Text>
-                    <Text style={styles.agentNote}>
-                      Set GATEWAY_API_KEY in your terminal first, then paste and run. The agent will upload the YAML to proxy {selected?.name || selected?.slug} after validation.
-                    </Text>
+                    <Text style={styles.agentNote}>Set GATEWAY_API_KEY in your terminal first, then paste and run.</Text>
                   </View>
                 ) : null}
               </View>
             )}
 
-            {/* Pipeline progress indicator */}
+            {/* Pipeline progress */}
             {stage !== "idle" && (
               <View style={[styles.progressBar, { borderColor: stageColor[stage] }]}>
                 <View style={styles.progressSteps}>
                   {(["scanning", "generating", "iterating", "done"] as Stage[]).map((s) => {
                     const passed = (s === "scanning" && (stage === "generating" || stage === "iterating" || stage === "done")) ||
-                      (s === "generating" && (stage === "iterating" || stage === "done")) ||
-                      (s === "iterating" && stage === "done");
+                      (s === "generating" && (stage === "iterating" || stage === "done")) || (s === "iterating" && stage === "done");
                     const current = stage === s;
                     return (
                       <View key={s} style={styles.progressStep}>
-                        <View style={[
-                          styles.progressDot,
-                          current && { backgroundColor: stageColor[s], borderColor: stageColor[s] },
-                          passed && { backgroundColor: theme.colors.ok, borderColor: theme.colors.ok },
-                        ]}>
+                        <View style={[styles.progressDot, current && { backgroundColor: stageColor[s], borderColor: stageColor[s] }, passed && { backgroundColor: theme.colors.ok, borderColor: theme.colors.ok }]}>
                           {passed ? <Check size={8} color={theme.colors.bg} /> : current ? <Loader size={8} color={theme.colors.bg} /> : null}
                         </View>
-                        <Text style={[
-                          styles.progressLabel,
-                          (current || passed) && { color: passed ? theme.colors.ok : stageColor[s] },
-                        ]}>
+                        <Text style={[styles.progressLabel, (current || passed) && { color: passed ? theme.colors.ok : stageColor[s] }]}>
                           {s === "scanning" ? "Capture" : s === "generating" ? "Generate" : s === "iterating" ? "Refine" : "Done"}
                         </Text>
                       </View>
@@ -453,41 +372,33 @@ npx tsx agents/phishlet-constructor.ts \\
                     injectedJavaScript={loginMode ? LOGIN_PROBE_SCRIPT : CAPTURE_SCRIPT}
                     onMessage={onMessage}
                     style={styles.webview}
-                    javaScriptEnabled
-                    thirdPartyCookiesEnabled
-                    domStorageEnabled
+                    javaScriptEnabled thirdPartyCookiesEnabled domStorageEnabled
                   />
                 </View>
               </View>
             )}
 
-            {/* Captured intelligence — live updating during scan */}
+            {/* Captured intelligence */}
             {stage !== "idle" && (
-              <View style={styles.intelCard}>
+              <View style={card.surface}>
                 <View style={styles.intelHeader}>
                   <Fingerprint size={14} color={stage === "scanning" ? theme.colors.cyan : theme.colors.accent} />
-                  <Text style={styles.intelTitle}>Captured intelligence</Text>
+                  <Text style={[typeStyles.sectionTitle, { flex: 1, color: theme.colors.text, fontSize: 14, fontWeight: "700" }]}>Captured intelligence</Text>
                   {stage === "scanning" && <PulseDot active size={8} color={theme.colors.cyan} />}
                 </View>
                 {captured.pageTitle ? (
-                  <View style={styles.intelRow}>
-                    <Globe size={11} color={theme.colors.textFaint} />
-                    <Text style={styles.intelVal} numberOfLines={1}>{captured.pageTitle as string}</Text>
-                  </View>
+                  <View style={styles.intelRow}><Globe size={11} color={theme.colors.textFaint} /><Text style={styles.intelVal} numberOfLines={1}>{captured.pageTitle as string}</Text></View>
                 ) : null}
                 {captured.formAction ? (
-                  <View style={styles.intelRow}>
-                    <Server size={11} color={theme.colors.textFaint} />
-                    <Text style={styles.intelVal} numberOfLines={1}>{(captured.formMethod as string)?.toUpperCase() ?? "POST"} {(captured.formAction as string)}</Text>
-                  </View>
+                  <View style={styles.intelRow}><Server size={11} color={theme.colors.textFaint} /><Text style={styles.intelVal} numberOfLines={1}>{(captured.formMethod as string)?.toUpperCase() ?? "POST"} {(captured.formAction as string)}</Text></View>
                 ) : null}
-                <View style={styles.metrics}>
+                <View style={styles.metricsRow}>
                   <MiniMetric label="URLs" value={(captured.urls as string[])?.length ?? 0} />
                   <MiniMetric label="Fields" value={(captured.formFields as unknown[])?.length ?? 0} />
                   <MiniMetric label="Cookies" value={(captured.cookies as string[])?.length ?? 0} />
                   <MiniMetric label="Domains" value={(captured.domains as string[])?.length ?? 0} />
                 </View>
-                <View style={styles.metrics}>
+                <View style={styles.metricsRow}>
                   <MiniMetric label="Hidden" value={(captured.hiddenInputs as unknown[])?.length ?? 0} />
                   <MiniMetric label="CSRF" value={(captured.csrfFields as unknown[])?.length ?? 0} />
                   <MiniMetric label="Auth URLs" value={(captured.authLinks as unknown[])?.length ?? 0} />
@@ -497,10 +408,7 @@ npx tsx agents/phishlet-constructor.ts \\
                   <View style={styles.detailList}>
                     <Text style={styles.detailListTitle}>Auth links</Text>
                     {(captured.authLinks as { href: string; text: string }[]).slice(0, 5).map((l, i) => (
-                      <View key={i} style={styles.detailRow}>
-                        <ExternalLink size={10} color={theme.colors.textFaint} />
-                        <Text style={styles.detailText} numberOfLines={1}>{l.text || l.href}</Text>
-                      </View>
+                      <View key={i} style={styles.detailRow}><ExternalLink size={10} color={theme.colors.textFaint} /><Text style={styles.detailText} numberOfLines={1}>{l.text || l.href}</Text></View>
                     ))}
                   </View>
                 )}
@@ -508,10 +416,7 @@ npx tsx agents/phishlet-constructor.ts \\
                   <View style={styles.detailList}>
                     <Text style={styles.detailListTitle}>API endpoints</Text>
                     {(captured.apiEndpoints as string[]).slice(0, 5).map((e, i) => (
-                      <View key={i} style={styles.detailRow}>
-                        <Server size={10} color={theme.colors.textFaint} />
-                        <Text style={styles.detailText} numberOfLines={1}>{e}</Text>
-                      </View>
+                      <View key={i} style={styles.detailRow}><Server size={10} color={theme.colors.textFaint} /><Text style={styles.detailText} numberOfLines={1}>{e}</Text></View>
                     ))}
                   </View>
                 )}
@@ -520,14 +425,9 @@ npx tsx agents/phishlet-constructor.ts \\
 
             {/* Generated YAML */}
             {generated ? (
-              <View style={styles.resultCard}>
-                <View style={styles.resultHeader}>
-                  <Wand2 size={14} color={theme.colors.warn} />
-                  <Text style={styles.resultTitle}>Generated phishlet</Text>
-                </View>
-                <ScrollView horizontal style={styles.codeScroll} showsHorizontalScrollIndicator={false}>
-                  <Text style={styles.code}>{generated}</Text>
-                </ScrollView>
+              <View style={card.surface}>
+                <View style={styles.resultHeader}><Wand2 size={14} color={theme.colors.warn} /><Text style={styles.resultTitle}>Generated phishlet</Text></View>
+                <ScrollView horizontal style={styles.codeScroll} showsHorizontalScrollIndicator={false}><Text style={styles.code}>{generated}</Text></ScrollView>
                 <Pressable onPress={() => copy(generated, "gen")} style={styles.copyRow}>
                   {copiedField === "gen" ? <Check size={12} color={theme.colors.ok} /> : <Copy size={12} color={theme.colors.accent} />}
                   <Text style={styles.copyText}>{copiedField === "gen" ? "Copied" : "Copy YAML"}</Text>
@@ -535,37 +435,30 @@ npx tsx agents/phishlet-constructor.ts \\
               </View>
             ) : null}
 
-            {/* Iteration report + refined YAML */}
+            {/* Iteration report */}
             {iterateResult ? (
-              <View style={styles.resultCard}>
+              <View style={card.surface}>
                 <View style={styles.resultHeader}>
                   <Shield size={14} color={theme.colors.ok} />
-                  <Text style={styles.resultTitle}>Refined phishlet</Text>
+                  <Text style={[styles.resultTitle, { flex: 1 }]}>Refined phishlet</Text>
                   <View style={[styles.scoreBadge, iterateResult.score >= 80 ? styles.scoreGood : styles.scoreWarn]}>
                     <Text style={styles.scoreText}>{iterateResult.score}/100</Text>
                   </View>
                 </View>
-                <Text style={styles.iterateMeta}>
-                  {iterateResult.passes} pass{iterateResult.passes !== 1 ? "es" : ""} · {iterateResult.critiques.length} finding{iterateResult.critiques.length !== 1 ? "s" : ""} · {iterateResult.improvements.length} improvement{iterateResult.improvements.length !== 1 ? "s" : ""}
-                </Text>
+                <Text style={styles.iterateMeta}>{iterateResult.passes} pass{iterateResult.passes !== 1 ? "es" : ""} · {iterateResult.critiques.length} finding{iterateResult.critiques.length !== 1 ? "s" : ""} · {iterateResult.improvements.length} improvement{iterateResult.improvements.length !== 1 ? "s" : ""}</Text>
                 {iterateResult.critiques.length > 0 && (
                   <View style={styles.critiqueList}>
                     {iterateResult.critiques.map((c, i) => (
                       <View key={i} style={styles.critiqueRow}>
                         <View style={[styles.severityDot, c.severity === "critical" ? styles.sevCritical : c.severity === "warning" ? styles.sevWarning : styles.sevInfo]} />
-                        <View style={styles.critiqueBody}>
-                          <Text style={styles.critiqueFinding}>{c.finding}</Text>
-                          <Text style={styles.critiqueFix}>{c.fix}</Text>
-                        </View>
+                        <View style={styles.critiqueBody}><Text style={styles.critiqueFinding}>{c.finding}</Text><Text style={styles.critiqueFix}>{c.fix}</Text></View>
                       </View>
                     ))}
                   </View>
                 )}
                 {refinedYaml ? (
                   <>
-                    <ScrollView horizontal style={styles.codeScroll} showsHorizontalScrollIndicator={false}>
-                      <Text style={styles.code}>{refinedYaml}</Text>
-                    </ScrollView>
+                    <ScrollView horizontal style={styles.codeScroll} showsHorizontalScrollIndicator={false}><Text style={styles.code}>{refinedYaml}</Text></ScrollView>
                     <Pressable onPress={() => copy(refinedYaml, "refined")} style={styles.copyRow}>
                       {copiedField === "refined" ? <Check size={12} color={theme.colors.ok} /> : <Copy size={12} color={theme.colors.accent} />}
                       <Text style={styles.copyText}>{copiedField === "refined" ? "Copied" : "Copy refined YAML"}</Text>
@@ -581,52 +474,14 @@ npx tsx agents/phishlet-constructor.ts \\
   );
 }
 
-// ── Mini sub-components ──
-
-function MiniMetric({ label, value }: { label: string; value: number }) {
-  return (
-    <View style={styles.miniMetric}>
-      <Text style={styles.miniMetricValue}>{value}</Text>
-      <Text style={styles.miniMetricLabel}>{label}</Text>
-    </View>
-  );
-}
-
-// ── Styles ──
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.colors.bg },
-  glow: { position: "absolute", top: 0, left: 0, right: 0, height: 280 },
-  content: { paddingHorizontal: theme.spacing(4), paddingBottom: theme.spacing(12), gap: theme.spacing(4) },
-  eyebrow: { color: theme.colors.accent, fontSize: 12, fontWeight: "700", letterSpacing: 2, fontFamily: theme.font.mono },
-  hero: { color: theme.colors.text, fontSize: 28, fontWeight: "800", letterSpacing: -0.5, marginTop: theme.spacing(1) },
-  sub: { color: theme.colors.textDim, fontSize: 13, lineHeight: 20, marginTop: theme.spacing(1.5) },
-
-  // State card
-  stateCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(6), gap: theme.spacing(3), alignItems: "center" },
-  stateText: { color: theme.colors.textDim, fontSize: 14, textAlign: "center" },
-  errorText: { color: theme.colors.danger, fontSize: 14, fontFamily: theme.font.mono, textAlign: "center" },
-
-  // Control card
-  controlCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(4), gap: theme.spacing(4) },
   controlTop: { gap: theme.spacing(2) },
-  controlLabel: { color: theme.colors.textFaint, fontSize: 10, fontWeight: "700", letterSpacing: 1.2, fontFamily: theme.font.mono },
   proxyChips: { flexDirection: "row", flexWrap: "wrap", gap: theme.spacing(2) },
   chip: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5), backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2) },
   chipActive: { backgroundColor: "rgba(255,178,62,0.10)", borderColor: theme.colors.warn },
   chipText: { color: theme.colors.textDim, fontSize: 12, fontWeight: "600", fontFamily: theme.font.mono },
   chipTextActive: { color: theme.colors.warn },
-  scanBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(2), backgroundColor: theme.colors.accent, borderRadius: theme.radius.md, paddingVertical: theme.spacing(3.5) },
-  scanBtnBusy: { opacity: 0.7 },
-  scanBtnText: { color: theme.colors.bg, fontSize: 14, fontWeight: "800" },
-  pressed: { opacity: 0.55 },
-
-  // Login Phishlet Automator
-  loginCard: { gap: theme.spacing(3) },
   loginRow: { flexDirection: "row", gap: theme.spacing(2) },
-  loginInput: { flex: 1, backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2.5), color: theme.colors.text, fontSize: 13, fontFamily: theme.font.mono },
-  loginBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(1.5), backgroundColor: theme.colors.accent, borderRadius: theme.radius.sm, paddingHorizontal: theme.spacing(4), paddingVertical: theme.spacing(2.5) },
-  loginBtnDisabled: { opacity: 0.5 },
-  loginBtnText: { color: theme.colors.bg, fontSize: 12, fontWeight: "800" },
   loginYamlCard: { backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3), gap: theme.spacing(2) },
   loginYamlHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
   loginYamlTitle: { color: theme.colors.text, fontSize: 12, fontWeight: "700" },
@@ -635,25 +490,16 @@ const styles = StyleSheet.create({
   loginYamlApplied: { color: theme.colors.ok, fontSize: 10, fontFamily: theme.font.mono, marginTop: -theme.spacing(1) },
   loginStatus: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2), paddingVertical: theme.spacing(2) },
   loginStatusText: { color: theme.colors.textDim, fontSize: 12, fontFamily: theme.font.mono },
-
-  // Headless Agent
-  agentCard: { gap: theme.spacing(3) },
-  agentSub: { color: theme.colors.textDim, fontSize: 12, lineHeight: 18 },
   agentToggle: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(1.5), backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingVertical: theme.spacing(2.5) },
-  agentToggleDisabled: { opacity: 0.5 },
   agentToggleText: { color: theme.colors.text, fontSize: 12, fontWeight: "700" },
   agentCommandCard: { backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(3), gap: theme.spacing(2) },
   agentCommand: { color: theme.colors.cyan, fontSize: 10, fontFamily: theme.font.mono, lineHeight: 16 },
   agentNote: { color: theme.colors.textFaint, fontSize: 10, fontFamily: theme.font.mono, lineHeight: 15 },
-
-  // Progress bar
   progressBar: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, paddingVertical: theme.spacing(3), paddingHorizontal: theme.spacing(4) },
   progressSteps: { flexDirection: "row", justifyContent: "space-between" },
   progressStep: { alignItems: "center", gap: theme.spacing(1.5) },
   progressDot: { width: 20, height: 20, borderRadius: 10, borderWidth: 2, borderColor: theme.colors.border, backgroundColor: theme.colors.bgElevated, alignItems: "center", justifyContent: "center" },
   progressLabel: { color: theme.colors.textFaint, fontSize: 9, fontWeight: "700", fontFamily: theme.font.mono, letterSpacing: 0.5 },
-
-  // Browser
   browserPanel: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, overflow: "hidden" },
   browserHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2.5), borderBottomWidth: 1, borderBottomColor: theme.colors.border, gap: theme.spacing(2) },
   browserUrlWrap: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2), flex: 1 },
@@ -662,41 +508,25 @@ const styles = StyleSheet.create({
   closeBrowserText: { color: theme.colors.textFaint, fontSize: 11, fontWeight: "600" },
   webviewWrap: { height: 340, backgroundColor: theme.colors.bg, margin: theme.spacing(2), borderRadius: theme.radius.sm, overflow: "hidden" },
   webview: { flex: 1 },
-
-  // Intel card
-  intelCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(4), gap: theme.spacing(3) },
   intelHeader: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2) },
-  intelTitle: { color: theme.colors.text, fontSize: 14, fontWeight: "700", flex: 1 },
   intelRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2), backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2) },
   intelVal: { color: theme.colors.textDim, fontSize: 11, fontFamily: theme.font.mono, flex: 1 },
-  metrics: { flexDirection: "row", gap: theme.spacing(2) },
-  miniMetric: { flex: 1, backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(2.5), alignItems: "center" },
-  miniMetricValue: { color: theme.colors.text, fontSize: 16, fontWeight: "800", fontFamily: theme.font.mono },
-  miniMetricLabel: { color: theme.colors.textFaint, fontSize: 9, fontWeight: "700", letterSpacing: 0.5, fontFamily: theme.font.mono, marginTop: 2 },
-
-  // Detail lists inside intel card
+  metricsRow: { flexDirection: "row", gap: theme.spacing(2) },
   detailList: { gap: theme.spacing(1.5) },
   detailListTitle: { color: theme.colors.textFaint, fontSize: 10, fontWeight: "700", letterSpacing: 0.5, fontFamily: theme.font.mono },
   detailRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5) },
   detailText: { color: theme.colors.textDim, fontSize: 10, fontFamily: theme.font.mono, flex: 1 },
-
-  // Result cards
-  resultCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(4), gap: theme.spacing(3) },
   resultHeader: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2) },
-  resultTitle: { color: theme.colors.text, fontSize: 14, fontWeight: "700", flex: 1 },
+  resultTitle: { color: theme.colors.text, fontSize: 14, fontWeight: "700" },
   codeScroll: { maxHeight: 200 },
   code: { color: theme.colors.text, fontSize: 10, fontFamily: theme.font.mono, lineHeight: 16 },
   copyRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5), alignSelf: "flex-start", backgroundColor: theme.colors.bgElevated, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2) },
   copyText: { color: theme.colors.accent, fontSize: 11, fontWeight: "700" },
-
-  // Score
   scoreBadge: { borderRadius: theme.radius.sm, paddingHorizontal: theme.spacing(2), paddingVertical: 2 },
   scoreGood: { backgroundColor: "rgba(60,224,138,0.12)", borderWidth: 1, borderColor: "rgba(60,224,138,0.35)" },
   scoreWarn: { backgroundColor: "rgba(255,178,62,0.12)", borderWidth: 1, borderColor: "rgba(255,178,62,0.35)" },
   scoreText: { color: theme.colors.text, fontSize: 11, fontWeight: "800", fontFamily: theme.font.mono },
   iterateMeta: { color: theme.colors.textFaint, fontSize: 11, fontFamily: theme.font.mono },
-
-  // Critiques
   critiqueList: { gap: theme.spacing(2) },
   critiqueRow: { flexDirection: "row", gap: theme.spacing(2) },
   severityDot: { width: 7, height: 7, borderRadius: 4, marginTop: 4 },

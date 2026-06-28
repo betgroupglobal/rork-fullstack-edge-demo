@@ -1,13 +1,13 @@
-import * as Clipboard from "expo-clipboard";
 import { LinearGradient } from "expo-linear-gradient";
-import { Check, ChevronDown, ChevronRight, Copy, Download, Play, RefreshCw, ShieldAlert, Trash2 } from "lucide-react-native";
-import React, { memo, useCallback, useMemo, useState } from "react";
+import { Download, Play, RefreshCw, ShieldAlert, Trash2 } from "lucide-react-native";
+import React, { useCallback, useMemo, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
   Modal,
   Platform,
   Pressable,
+  RefreshControl,
   ScrollView,
   Share,
   StyleSheet,
@@ -17,221 +17,18 @@ import {
 } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
+import CopyBtn from "@/components/CopyBtn";
 import FadeIn from "@/components/FadeIn";
 import OfflineCard from "@/components/OfflineCard";
 import PressableScale from "@/components/PressableScale";
+import { SkeletonCard } from "@/components/SkeletonBlock";
+import EmptyState from "@/components/EmptyState";
+import TargetGroup from "@/components/TargetGroup";
+import { layout, card, type as typeStyles, form, list } from "@/constants/styles";
 import { theme } from "@/constants/theme";
 import { useDeleteIntercepts, useHarExport, useIntercepts, useReplayHar } from "@/hooks/useGateway";
 import { useApiKey } from "@/hooks/useApiKey";
-import { CREDENTIAL_FIELDS, SENSITIVE_FIELDS, type InterceptCapture, type ReplayReport } from "@/lib/api";
-
-// ── Body parsing ──
-
-function parseBody(raw: string): Array<{ key: string; value: string }> | null {
-  if (!raw) return null;
-  try {
-    const obj = JSON.parse(raw) as unknown;
-    if (obj && typeof obj === "object" && !Array.isArray(obj)) {
-      const rec = obj as Record<string, unknown>;
-      const inner = rec.form ?? rec.data ?? rec;
-      if (inner && typeof inner === "object" && !Array.isArray(inner)) {
-        return Object.entries(inner as Record<string, unknown>).map(([key, value]) => ({
-          key, value: typeof value === "string" ? value : JSON.stringify(value),
-        }));
-      }
-    }
-  } catch { /* not JSON */ }
-  if (raw.includes("=")) {
-    try {
-      const params = new URLSearchParams(raw);
-      const result: Array<{ key: string; value: string }> = [];
-      params.forEach((v, k) => result.push({ key: k, value: v }));
-      if (result.length > 0) return result;
-    } catch { /* not URL-encoded */ }
-  }
-  return null;
-}
-
-function extractUrl(raw: string): string | null {
-  if (!raw) return null;
-  try {
-    const obj = JSON.parse(raw) as Record<string, unknown>;
-    return typeof obj.url === "string" ? obj.url : null;
-  } catch { return null; }
-}
-
-function fieldType(key: string): "credential" | "sensitive" | "normal" {
-  const lower = key.toLowerCase();
-  if (CREDENTIAL_FIELDS.has(lower)) return "credential";
-  if (SENSITIVE_FIELDS.has(lower)) return "sensitive";
-  for (const f of CREDENTIAL_FIELDS) {
-    if (lower.includes(f)) return SENSITIVE_FIELDS.has(f) ? "sensitive" : "credential";
-  }
-  return "normal";
-}
-
-// ── Mini components ──
-
-const CopyBtn = memo(function CopyBtn({ value }: { value: string }) {
-  const [done, setDone] = useState(false);
-  const copy = useCallback(async () => {
-    await Clipboard.setStringAsync(value);
-    setDone(true);
-    setTimeout(() => setDone(false), 1400);
-  }, [value]);
-  return (
-    <Pressable onPress={copy} hitSlop={8} style={({ pressed }) => [styles.copyIcon, pressed && styles.pressed]}>
-      {done ? <Check size={11} color={theme.colors.ok} /> : <Copy size={11} color={theme.colors.textFaint} />}
-    </Pressable>
-  );
-});
-
-const CredRow = memo(function CredRow({ label, value, type }: { label: string; value: string; type: "sensitive" | "credential" | "normal" }) {
-  return (
-    <View style={[styles.tblRow, type === "sensitive" && styles.tblRowSens, type === "credential" && styles.tblRowCred]}>
-      <View style={styles.tblKeyCell}>
-        {type !== "normal" && (
-          <View style={[styles.tblBadge, type === "sensitive" ? styles.tblBadgeSens : styles.tblBadgeCred]}>
-            <Text style={styles.tblBadgeText}>{type === "sensitive" ? "PASS" : "ID"}</Text>
-          </View>
-        )}
-        <Text style={styles.tblKey} numberOfLines={1}>{label}</Text>
-      </View>
-      <View style={styles.tblValCell}>
-        <Text style={[styles.tblVal, type === "sensitive" && styles.tblValSens, type === "credential" && styles.tblValCred]} selectable numberOfLines={0}>
-          {value || "—"}
-        </Text>
-        <CopyBtn value={value} />
-      </View>
-    </View>
-  );
-});
-
-// ── Capture row inside a group ──
-
-const CaptureRow = memo(function CaptureRow({ capture, expanded, onToggle }: { capture: InterceptCapture; expanded: boolean; onToggle: () => void }) {
-  const ts = new Date(capture.ts).toLocaleTimeString("en-AU", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false });
-  const fields = parseBody(capture.reqBody) ?? [];
-  const captureUrl = extractUrl(capture.reqBody);
-  const credFields = fields.filter(f => fieldType(f.key) !== "normal");
-  const otherFields = fields.filter(f => fieldType(f.key) === "normal");
-
-  return (
-    <View style={styles.captureRow}>
-      <Pressable onPress={onToggle} style={({ pressed }) => [styles.captureRowHead, pressed && styles.pressed]}>
-        <View style={styles.captureRowMeta}>
-          <Text style={styles.captureTs}>{ts}</Text>
-          <Text style={styles.captureMethod}>{capture.method}</Text>
-          <Text style={styles.capturePath} numberOfLines={1}>{captureUrl ?? capture.path}</Text>
-        </View>
-        <View style={styles.captureRowRight}>
-          {credFields.length > 0 && (
-            <View style={styles.credCountBadge}>
-              <ShieldAlert size={8} color={theme.colors.warn} />
-              <Text style={styles.credCountText}>{credFields.length}</Text>
-            </View>
-          )}
-          {expanded ? <ChevronDown size={12} color={theme.colors.textFaint} /> : <ChevronRight size={12} color={theme.colors.textFaint} />}
-        </View>
-      </Pressable>
-      {expanded && (
-        <View style={styles.captureDetail}>
-          {fields.length > 0 ? (
-            <View style={styles.tbl}>
-              <View style={styles.tblHeader}>
-                <Text style={[styles.tblHeaderCell, { flex: 1 }]}>FIELD</Text>
-                <Text style={[styles.tblHeaderCell, { flex: 2 }]}>VALUE</Text>
-              </View>
-              {credFields.map(f => (<CredRow key={f.key} label={f.key} value={f.value} type={fieldType(f.key)} />))}
-              {otherFields.map(f => (<CredRow key={f.key} label={f.key} value={f.value} type="normal" />))}
-            </View>
-          ) : (
-            <View style={styles.captureRawBlock}>
-              <Text style={styles.captureRawText} selectable>{capture.reqBody || "(empty body)"}</Text>
-            </View>
-          )}
-        </View>
-      )}
-    </View>
-  );
-});
-
-// ── Group per proxy slug ──
-
-function TargetGroup({ slug, captures }: { slug: string; captures: InterceptCapture[] }) {
-  const [open, setOpen] = useState(true);
-  const [expandedId, setExpandedId] = useState<number | null>(null);
-
-  const allCreds = useMemo(() => {
-    const seen = new Set<string>();
-    const rows: Array<{ key: string; value: string }> = [];
-    for (const c of captures) {
-      const fields = parseBody(c.reqBody) ?? [];
-      for (const f of fields) {
-        if (fieldType(f.key) !== "normal" && !seen.has(f.key + "::" + f.value)) {
-          seen.add(f.key + "::" + f.value);
-          rows.push(f);
-        }
-      }
-    }
-    return rows;
-  }, [captures]);
-
-  const latestTs = new Date(Math.max(...captures.map(c => c.ts))).toLocaleString("en-AU", {
-    day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit", hour12: false,
-  });
-
-  return (
-    <View style={styles.targetGroup}>
-      <Pressable onPress={() => setOpen(v => !v)} style={({ pressed }) => [styles.targetGroupHead, pressed && styles.pressed]}>
-        <View style={styles.targetGroupLeft}>
-          <ShieldAlert size={14} color={theme.colors.warn} />
-          <View>
-            <Text style={styles.targetSlug}>{slug}</Text>
-            <Text style={styles.targetMeta}>{captures.length} capture{captures.length !== 1 ? "s" : ""} · last {latestTs}</Text>
-          </View>
-        </View>
-        <View style={styles.targetGroupRight}>
-          {allCreds.length > 0 && (
-            <View style={styles.credCountBadge}>
-              <Text style={styles.credCountText}>{allCreds.length} creds</Text>
-            </View>
-          )}
-          {open ? <ChevronDown size={14} color={theme.colors.textFaint} /> : <ChevronRight size={14} color={theme.colors.textFaint} />}
-        </View>
-      </Pressable>
-      {open && (
-        <View style={styles.targetGroupBody}>
-          {allCreds.length > 0 && (
-            <View style={styles.credSummary}>
-              <View style={styles.credSummaryHead}>
-                <ShieldAlert size={11} color={theme.colors.warn} />
-                <Text style={styles.credSummaryTitle}>CERTIFIED CREDENTIALS</Text>
-              </View>
-              <View style={styles.tbl}>
-                <View style={styles.tblHeader}>
-                  <Text style={[styles.tblHeaderCell, { flex: 1 }]}>FIELD</Text>
-                  <Text style={[styles.tblHeaderCell, { flex: 2 }]}>VALUE</Text>
-                </View>
-                {allCreds.map((f, i) => (
-                  <CredRow key={i} label={f.key} value={f.value} type={fieldType(f.key)} />
-                ))}
-              </View>
-            </View>
-          )}
-          <View style={styles.captureList}>
-            <Text style={styles.captureListTitle}>All requests ({captures.length})</Text>
-            {[...captures].reverse().map(c => (
-              <CaptureRow key={c.id} capture={c} expanded={expandedId === c.id} onToggle={() => setExpandedId(v => v === c.id ? null : c.id)} />
-            ))}
-          </View>
-        </View>
-      )}
-    </View>
-  );
-}
-
-// ── Main screen ──
+import type { InterceptCapture, ReplayReport } from "@/lib/api";
 
 export default function InterceptsScreen() {
   const insets = useSafeAreaInsets();
@@ -259,7 +56,7 @@ export default function InterceptsScreen() {
       map.get(key)!.push(c);
     }
     return Array.from(map.entries()).sort((a, b) =>
-      Math.max(...b[1].map(x => x.ts)) - Math.max(...a[1].map(x => x.ts))
+      Math.max(...b[1].map((x) => x.ts)) - Math.max(...a[1].map((x) => x.ts)),
     );
   }, [captures]);
 
@@ -302,21 +99,29 @@ export default function InterceptsScreen() {
   }, [harPaste, replaySlug, replay]);
 
   return (
-    <View style={styles.root}>
-      <LinearGradient colors={["rgba(255,178,62,0.12)", "transparent"]} start={{ x: 0.1, y: 0 }} end={{ x: 0.9, y: 0.5 }} style={styles.glow} pointerEvents="none" />
+    <View style={layout.root}>
+      <LinearGradient colors={["rgba(255,178,62,0.12)", "transparent"]} start={{ x: 0.1, y: 0 }} end={{ x: 0.9, y: 0.5 }} style={layout.glow} pointerEvents="none" />
       <ScrollView
-        contentContainerStyle={[styles.content, { paddingTop: insets.top + theme.spacing(6) }]}
+        contentContainerStyle={[layout.content, { paddingTop: insets.top + theme.spacing(6) }]}
         showsVerticalScrollIndicator={false}
+        refreshControl={
+          <RefreshControl
+            refreshing={isFetching}
+            onRefresh={() => refetch()}
+            tintColor={theme.colors.warn}
+            colors={[theme.colors.warn]}
+          />
+        }
       >
         {/* Header */}
         <View style={styles.header}>
           <View style={styles.headerLeft}>
             <View style={styles.eyebrowRow}>
-              <Text style={styles.eyebrow}>INTERCEPT LAB</Text>
+              <Text style={[typeStyles.eyebrow, { color: theme.colors.warn }]}>INTERCEPT LAB</Text>
               {isFetching && !isLoading && <RefreshCw size={10} color={theme.colors.warn} />}
             </View>
             <View style={styles.heroRow}>
-              <Text style={styles.hero}>Captures</Text>
+              <Text style={[typeStyles.hero, { fontSize: 26 }]}>Captures</Text>
               <View style={[styles.countBadge, captures.length > 0 && styles.countBadgeActive]}>
                 <Text style={styles.countBadgeText}>{captures.length}</Text>
               </View>
@@ -325,7 +130,7 @@ export default function InterceptsScreen() {
           </View>
         </View>
 
-        {/* Quick actions row */}
+        {/* Quick actions */}
         <View style={styles.quickActions}>
           {captures.length > 0 && (
             <>
@@ -349,20 +154,19 @@ export default function InterceptsScreen() {
         {isError ? (
           <OfflineCard message={error?.message ?? "Could not load intercept captures."} onRetry={() => refetch()} />
         ) : isLoading ? (
-          <View style={styles.stateCard}>
-            <ActivityIndicator color={theme.colors.warn} />
-            <Text style={styles.stateText}>Loading captures…</Text>
+          <View style={list.gap}>
+            {Array.from({ length: 3 }).map((_, i) => (
+              <SkeletonCard key={i} height={100} />
+            ))}
           </View>
         ) : captures.length === 0 ? (
-          <View style={styles.stateCard}>
-            <ShieldAlert size={32} color={theme.colors.textFaint} />
-            <Text style={styles.stateText}>No captures yet.</Text>
-            <Text style={styles.stateHint}>
-              Toggle "Intercept" on a proxy target to start capturing credentials, forms, and request data from proxied traffic.
-            </Text>
-          </View>
+          <EmptyState
+            icon={<ShieldAlert size={26} color={theme.colors.warn} />}
+            title="No captures yet"
+            subtitle='Toggle "Intercept" on a proxy target to start capturing credentials, forms, and request data from proxied traffic.'
+          />
         ) : (
-          <View style={styles.list}>
+          <View style={list.gap}>
             {grouped.map(([slug, caps], i) => (
               <FadeIn key={slug} delay={i * 70}>
                 <TargetGroup slug={slug} captures={caps} />
@@ -374,10 +178,10 @@ export default function InterceptsScreen() {
 
       {/* Replay modal */}
       <Modal visible={showReplay} animationType="slide" presentationStyle="pageSheet" onRequestClose={() => setShowReplay(false)}>
-        <View style={[styles.root, { paddingTop: insets.top + theme.spacing(4) }]}>
+        <View style={[layout.root, { paddingTop: insets.top + theme.spacing(4) }]}>
           <View style={styles.modalHeader}>
             <Text style={styles.modalTitle}>Har Replay Engine</Text>
-            <Pressable onPress={() => setShowReplay(false)} style={({ pressed }) => [styles.modalClose, pressed && styles.pressed]}>
+            <Pressable onPress={() => setShowReplay(false)} style={({ pressed }) => [styles.modalClose, pressed && { opacity: 0.55 }]}>
               <Text style={styles.modalCloseText}>Close</Text>
             </Pressable>
           </View>
@@ -386,16 +190,16 @@ export default function InterceptsScreen() {
               Paste a HAR (HTTP Archive) JSON blob and specify which proxy target to replay against. The engine sequentially executes every request, tracks cookies, and extracts tokens from the flow.
             </Text>
             <View style={styles.modalField}>
-              <Text style={styles.modalLabel}>PROXY SLUG</Text>
-              <TextInput style={styles.modalInput} value={replaySlug} onChangeText={setReplaySlug} placeholder="e.g. my-target" placeholderTextColor={theme.colors.textFaint} autoCapitalize="none" autoCorrect={false} />
+              <Text style={form.label}>PROXY SLUG</Text>
+              <TextInput style={form.input} value={replaySlug} onChangeText={setReplaySlug} placeholder="e.g. my-target" placeholderTextColor={theme.colors.textFaint} autoCapitalize="none" autoCorrect={false} />
             </View>
             <View style={styles.modalField}>
-              <Text style={styles.modalLabel}>HAR JSON</Text>
-              <TextInput style={[styles.modalInput, styles.modalInputLarge]} value={harPaste} onChangeText={setHarPaste} placeholder='Paste HAR JSON here ({"log":...})' placeholderTextColor={theme.colors.textFaint} multiline textAlignVertical="top" autoCapitalize="none" autoCorrect={false} />
+              <Text style={form.label}>HAR JSON</Text>
+              <TextInput style={[form.input, styles.modalInputLarge]} value={harPaste} onChangeText={setHarPaste} placeholder='Paste HAR JSON here ({"log":...})' placeholderTextColor={theme.colors.textFaint} multiline textAlignVertical="top" autoCapitalize="none" autoCorrect={false} />
             </View>
-            <PressableScale onPress={runReplay} disabled={replay.isPending} haptic="medium" style={[styles.modalRunBtn, replay.isPending && { opacity: 0.5 }]}>
+            <PressableScale onPress={runReplay} disabled={replay.isPending} haptic="medium" style={[form.submitBtn, { backgroundColor: theme.colors.cyan }, replay.isPending && { opacity: 0.5 }]}>
               {replay.isPending ? <ActivityIndicator color={theme.colors.bg} size="small" /> : <Play size={16} color={theme.colors.bg} />}
-              <Text style={styles.modalRunText}>{replay.isPending ? "Replaying…" : "Run Replay"}</Text>
+              <Text style={form.submitText}>{replay.isPending ? "Replaying…" : "Run Replay"}</Text>
             </PressableScale>
             {replayResult && (
               <View style={styles.replayResult}>
@@ -416,7 +220,7 @@ export default function InterceptsScreen() {
                     {replayResult.extractedTokens.map((t, i) => (
                       <View key={i} style={styles.replayTokenRow}>
                         <Text style={styles.replayTokenText} selectable numberOfLines={2}>{t}</Text>
-                        <CopyBtn value={t} />
+                        <CopyBtn value={t} size={11} />
                       </View>
                     ))}
                   </View>
@@ -451,15 +255,10 @@ export default function InterceptsScreen() {
 }
 
 const styles = StyleSheet.create({
-  root: { flex: 1, backgroundColor: theme.colors.bg },
-  glow: { position: "absolute", top: 0, left: 0, right: 0, height: 280 },
-  content: { paddingHorizontal: theme.spacing(4), paddingBottom: theme.spacing(12), gap: theme.spacing(4) },
   header: { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
   headerLeft: { flex: 1, gap: theme.spacing(1) },
   eyebrowRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5) },
   heroRow: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2) },
-  eyebrow: { color: theme.colors.warn, fontSize: 12, fontWeight: "700", letterSpacing: 2, fontFamily: theme.font.mono },
-  hero: { color: theme.colors.text, fontSize: 26, fontWeight: "800", letterSpacing: -0.5 },
   countBadge: { backgroundColor: theme.colors.surfaceAlt, borderRadius: 10, paddingHorizontal: theme.spacing(2), paddingVertical: 2, borderWidth: 1, borderColor: theme.colors.border },
   countBadgeActive: { backgroundColor: "rgba(255,178,62,0.15)", borderColor: "rgba(255,178,62,0.4)" },
   countBadgeText: { color: theme.colors.warn, fontSize: 12, fontWeight: "800", fontFamily: theme.font.mono },
@@ -470,61 +269,6 @@ const styles = StyleSheet.create({
   playBtn: { borderColor: theme.colors.cyan, backgroundColor: theme.colors.surface },
   clearBtn: { borderColor: theme.colors.danger, backgroundColor: theme.colors.surface },
   quickText: { color: theme.colors.accent, fontSize: 11, fontWeight: "700" },
-  stateCard: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, padding: theme.spacing(6), gap: theme.spacing(3), alignItems: "center" },
-  stateText: { color: theme.colors.textDim, fontSize: 14, lineHeight: 21, textAlign: "center" },
-  stateHint: { color: theme.colors.textFaint, fontSize: 12, lineHeight: 18, textAlign: "center", fontFamily: theme.font.mono },
-  errorText: { color: theme.colors.danger, fontSize: 14, fontFamily: theme.font.mono, textAlign: "center" },
-  list: { gap: theme.spacing(3) },
-  pressed: { opacity: 0.55 },
-  copyIcon: { paddingTop: 2 },
-
-  // Target group
-  targetGroup: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.md, borderWidth: 1, borderColor: theme.colors.border, overflow: "hidden" },
-  targetGroupHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", padding: theme.spacing(3), gap: theme.spacing(3) },
-  targetGroupLeft: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2.5), flex: 1 },
-  targetGroupRight: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2) },
-  targetSlug: { color: theme.colors.warn, fontSize: 14, fontWeight: "800", fontFamily: theme.font.mono },
-  targetMeta: { color: theme.colors.textFaint, fontSize: 11, fontFamily: theme.font.mono, marginTop: 1 },
-  credCountBadge: { flexDirection: "row", alignItems: "center", gap: 3, backgroundColor: "rgba(255,178,62,0.15)", borderRadius: 8, paddingHorizontal: 6, paddingVertical: 2, borderWidth: 1, borderColor: "rgba(255,178,62,0.3)" },
-  credCountText: { color: theme.colors.warn, fontSize: 10, fontWeight: "800", fontFamily: theme.font.mono },
-  targetGroupBody: { borderTopWidth: 1, borderTopColor: theme.colors.border },
-
-  // Credential summary
-  credSummary: { borderBottomWidth: 1, borderBottomColor: theme.colors.border },
-  credSummaryHead: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5), paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2), backgroundColor: "rgba(255,178,62,0.07)" },
-  credSummaryTitle: { color: theme.colors.warn, fontSize: 10, fontWeight: "800", letterSpacing: 1.2, fontFamily: theme.font.mono },
-
-  // Table
-  tbl: { overflow: "hidden" },
-  tblHeader: { flexDirection: "row", backgroundColor: theme.colors.bg, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(1.5), borderBottomWidth: 1, borderBottomColor: theme.colors.border },
-  tblHeaderCell: { color: theme.colors.textFaint, fontSize: 9, fontWeight: "800", letterSpacing: 1, fontFamily: theme.font.mono },
-  tblRow: { flexDirection: "row", alignItems: "flex-start", paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2), borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.04)", gap: theme.spacing(2) },
-  tblRowSens: { backgroundColor: "rgba(239,68,68,0.07)" },
-  tblRowCred: { backgroundColor: "rgba(255,178,62,0.05)" },
-  tblKeyCell: { flex: 1, flexDirection: "row", alignItems: "center", gap: theme.spacing(1), flexWrap: "wrap" },
-  tblBadge: { borderRadius: 3, paddingHorizontal: 4, paddingVertical: 1 },
-  tblBadgeSens: { backgroundColor: "rgba(239,68,68,0.3)" },
-  tblBadgeCred: { backgroundColor: "rgba(255,178,62,0.3)" },
-  tblBadgeText: { fontSize: 8, fontWeight: "800", fontFamily: theme.font.mono, color: theme.colors.text },
-  tblKey: { color: theme.colors.textDim, fontSize: 11, fontFamily: theme.font.mono },
-  tblValCell: { flex: 2, flexDirection: "row", alignItems: "flex-start", gap: theme.spacing(1.5) },
-  tblVal: { color: theme.colors.text, fontSize: 13, fontFamily: theme.font.mono, flex: 1, lineHeight: 19 },
-  tblValSens: { color: "#f87171", fontWeight: "700" },
-  tblValCred: { color: theme.colors.warn, fontWeight: "700" },
-
-  // Capture rows
-  captureList: { borderTopWidth: 1, borderTopColor: theme.colors.border },
-  captureListTitle: { color: theme.colors.textFaint, fontSize: 9, fontWeight: "800", letterSpacing: 1, fontFamily: theme.font.mono, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(1.5), backgroundColor: theme.colors.bg },
-  captureRow: { borderBottomWidth: 1, borderBottomColor: "rgba(255,255,255,0.04)" },
-  captureRowHead: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2), gap: theme.spacing(2) },
-  captureRowMeta: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2), flex: 1 },
-  captureTs: { color: theme.colors.textFaint, fontSize: 10, fontFamily: theme.font.mono },
-  captureMethod: { color: theme.colors.accent, fontSize: 10, fontWeight: "700", fontFamily: theme.font.mono },
-  capturePath: { color: theme.colors.textDim, fontSize: 11, fontFamily: theme.font.mono, flex: 1 },
-  captureRowRight: { flexDirection: "row", alignItems: "center", gap: theme.spacing(1.5) },
-  captureDetail: { backgroundColor: theme.colors.bg, borderTopWidth: 1, borderTopColor: theme.colors.border },
-  captureRawBlock: { padding: theme.spacing(3) },
-  captureRawText: { color: theme.colors.textDim, fontSize: 11, fontFamily: theme.font.mono, lineHeight: 17 },
 
   // Modal
   modalHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: theme.spacing(4), paddingVertical: theme.spacing(3), borderBottomWidth: 1, borderBottomColor: theme.colors.border },
@@ -534,11 +278,7 @@ const styles = StyleSheet.create({
   modalContent: { padding: theme.spacing(4), paddingBottom: theme.spacing(16), gap: theme.spacing(4) },
   modalHint: { color: theme.colors.textDim, fontSize: 13, lineHeight: 20, fontFamily: theme.font.mono },
   modalField: { gap: theme.spacing(1.5) },
-  modalLabel: { color: theme.colors.textFaint, fontSize: 10, fontWeight: "800", letterSpacing: 1.2, fontFamily: theme.font.mono },
-  modalInput: { backgroundColor: theme.colors.surface, borderRadius: theme.radius.sm, borderWidth: 1, borderColor: theme.colors.border, paddingHorizontal: theme.spacing(3), paddingVertical: theme.spacing(2.5), color: theme.colors.text, fontSize: 14, fontFamily: theme.font.mono },
   modalInputLarge: { minHeight: 140, paddingTop: theme.spacing(2.5) },
-  modalRunBtn: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: theme.spacing(2), backgroundColor: theme.colors.cyan, borderRadius: theme.radius.sm, paddingVertical: theme.spacing(3) },
-  modalRunText: { color: theme.colors.bg, fontSize: 14, fontWeight: "800" },
 
   // Replay result
   replayResult: { gap: theme.spacing(4) },

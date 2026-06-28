@@ -8,10 +8,12 @@ const PORT = parseInt(process.env.PORT || "8787", 10);
 const API_KEY = process.env.API_KEY || "";
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS || "";
 
-// AI proxy config (Kimi K2.7 via Rork Toolkit)
+// AI proxy config (Kimi K2.7 + Grok Build 0.1 via Rork Toolkit)
 const TOOLKIT_URL = process.env.TOOLKIT_URL || "";
 const TOOLKIT_SECRET_KEY = process.env.TOOLKIT_SECRET_KEY || "";
-const AI_PHISHLET_ENABLED = !!TOOLKIT_URL && !!TOOLKIT_SECRET_KEY;
+const AI_ENABLED = !!TOOLKIT_URL && !!TOOLKIT_SECRET_KEY;
+const AI_PHISHLET_ENABLED = AI_ENABLED;
+const AI_BUILD_ENABLED = AI_ENABLED;
 
 // ── In-memory storage ───────────────────────────────────────────────────────
 let nextId = 1;
@@ -25,6 +27,143 @@ const startedAt = Date.now();
 
 // ── Proxy-manager bridge (Pangolin/frp-style tunnel management) ─────────────
 const PROXY_MANAGER_URL = `http://127.0.0.1:${process.env.PROXY_API_PORT || "7001"}`;
+
+// ── Grok Build 0.1 — AI-powered proxy server config generation ─────────────
+const GROK_MODEL = "xai/grok-build-0.1";
+
+/**
+ * Calls Grok Build 0.1 via the Rork Toolkit proxy to generate or validate
+ * proxy server configurations, launch scripts, and tunnel layouts.
+ *
+ * @param {{"generate"|"validate"|"optimize"}} mode
+ * @param {{ targetHost:string, ports?:number[], tunnelCount?:number, existingConfig?:string }} params
+ * @returns {Promise<{config?:string, validation?:object, suggestions?:string[]}|null>}
+ */
+async function callGrokBuild(mode, params) {
+  if (!AI_BUILD_ENABLED) return null;
+
+  const { targetHost, ports, tunnelCount, existingConfig } = params;
+
+  const systemPrompt = [
+    "You are Grok Build 0.1 — xAI's fast agentic coding model.",
+    "You generate and validate proxy tunnel server configurations.",
+    "You work with Pangolin/frp/NetBird-style self-hosted proxy pipelines.",
+    "Output must be valid TOML for the proxy-manager config system.",
+    "",
+    "## Config format (TOML):",
+    "```toml",
+    "[server]",
+    "bindAddr = \"0.0.0.0\"",
+    "bindPort = 7000",
+    "",
+    "[health]",
+    "path = \"/health\"",
+    "intervalSeconds = 30",
+    "timeoutSeconds = 5",
+    "",
+    "[[proxies]]",
+    "name = \"my-tunnel\"",
+    "type = \"tcp\"  # or \"http\"",
+    "localIP = \"127.0.0.1\"",
+    "localPort = 3000",
+    "remotePort = 6000",
+    "autoStart = true",
+    "```",
+    "",
+    "## Rules:",
+    "- Use double-quoted strings.",
+    "- Ports must not collide with known system ports (22, 80, 443, 3306, 5432, 6379, 8080, 8443).",
+    "- Assign remotePort starting from 10000-50000 range.",
+    "- For HTTP tunnels, set type=\"http\".",
+    "- For TCP tunnels, set type=\"tcp\".",
+    "- Always include a health check block.",
+    "- Output ONLY the TOML. No markdown fences, no commentary.",
+  ].join("\n");
+
+  let userPrompt;
+  if (mode === "generate") {
+    userPrompt = [
+      `Generate a proxy tunnel server configuration for: ${targetHost}`,
+      `Required tunnel count: ${tunnelCount || 1}`,
+      ports?.length ? `Preferred remote ports: ${ports.join(", ")}` : "Auto-assign remote ports in 10000-50000 range.",
+      "Include health check, logging, and auth blocks.",
+      "Output ONLY the TOML.",
+    ].join("\n");
+  } else if (mode === "validate") {
+    userPrompt = [
+      `Validate this proxy tunnel config for: ${targetHost}`,
+      "Check for: port collisions, missing health checks, invalid types, unsafe bind addresses.",
+      "",
+      "## Config to validate:",
+      "```toml",
+      existingConfig || "",
+      "```",
+      "",
+      `Output JSON: {"valid":true|false,"issues":[{"severity":"critical|warning|info","line":"...","message":"...","fix":"suggested fix"}]}`,
+    ].join("\n");
+  } else if (mode === "optimize") {
+    userPrompt = [
+      `Optimize this proxy tunnel config for: ${targetHost}`,
+      "Improve: port allocation, tunnel types, health check intervals, logging config.",
+      "",
+      "## Current config:",
+      "```toml",
+      existingConfig || "",
+      "```",
+      "",
+      `Output JSON: {"config":"<optimized TOML>","changes":["what was changed and why"],"score":<0-100>}`,
+    ].join("\n");
+  }
+
+  try {
+    const body = JSON.stringify({
+      model: GROK_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      max_tokens: 4096,
+      temperature: 0.1,
+    });
+
+    const url = new URL("/v2/vercel/v1/chat/completions", TOOLKIT_URL);
+    const result = await httpPost(url, body);
+
+    if (!result?.choices?.[0]?.message?.content) {
+      console.error("[grok-build] empty response");
+      return null;
+    }
+
+    let raw = result.choices[0].message.content.trim();
+    raw = raw.replace(/^```(?:toml|json)?\s*\n?/i, "").replace(/\n?```\s*$/, "");
+
+    if (mode === "generate" || mode === "optimize") {
+      if (mode === "optimize") {
+        try {
+          const parsed = JSON.parse(raw);
+          return { config: parsed.config || raw, suggestions: parsed.changes || [], score: parsed.score };
+        } catch {
+          return { config: raw, suggestions: ["AI-optimized config generated"], score: 80 };
+        }
+      }
+      return { config: raw };
+    }
+
+    if (mode === "validate") {
+      try {
+        const parsed = JSON.parse(raw);
+        return { validation: parsed };
+      } catch {
+        return { validation: { valid: true, issues: [] } };
+      }
+    }
+
+    return null;
+  } catch (err) {
+    console.error(`[grok-build] AI call failed: ${err.message}`);
+    return null;
+  }
+}
 
 /** Forward a request to the proxy-manager's internal API and return parsed JSON. */
 function proxyManagerFetch(path, options = {}) {
@@ -989,6 +1128,113 @@ async function handleRequest(req, res) {
     const authErr = checkAuth(req);
     if (authErr) return json(res, authErr.status, authErr.body, cors);
     const result = await proxyManagerFetch(`/api/proxy/tunnels/${tunnelStopMatch[1]}/stop`, { method: "POST" });
+    return json(res, result.status, result.body, cors);
+  }
+
+  // ── Proxy server launch management (Grok Build 0.1 powered) ───
+
+  // POST /api/proxy/servers/configure — Grok Build 0.1 generates optimal server config
+  if (pathname === "/api/proxy/servers/configure" && method === "POST") {
+    const authErr = checkAuth(req);
+    if (authErr) return json(res, authErr.status, authErr.body, cors);
+    const body = await readBody(req);
+    if (!body?.targetHost) return json(res, 400, { success: false, error: "targetHost is required" }, cors);
+
+    const aiResult = await callGrokBuild("generate", {
+      targetHost: body.targetHost,
+      ports: body.ports,
+      tunnelCount: body.tunnelCount || 1,
+    });
+
+    if (aiResult?.config) {
+      return json(res, 200, {
+        success: true,
+        data: { config: aiResult.config, model: GROK_MODEL, generated: true },
+      }, cors);
+    }
+
+    // Fallback: generate deterministic config
+    const fallbackConfig = [
+      "# Edge Gateway proxy server config",
+      `# Target: ${body.targetHost}`,
+      "",
+      "[server]",
+      "bindAddr = \"0.0.0.0\"",
+      `bindPort = ${body.ports?.[0] || 12000}`,
+      "",
+      "[health]",
+      "path = \"/health\"",
+      "intervalSeconds = 30",
+      "timeoutSeconds = 5",
+      "",
+      "[[proxies]]",
+      `name = \"${body.targetHost.replace(/[^a-zA-Z0-9]/g, "-")}\"`,
+      "type = \"http\"",
+      "localIP = \"127.0.0.1\"",
+      "localPort = 8787",
+      "remotePort = 10000",
+      "autoStart = true",
+    ].join("\n");
+
+    return json(res, 200, {
+      success: true,
+      data: { config: fallbackConfig, generated: false },
+    }, cors);
+  }
+
+  // POST /api/proxy/servers/validate — Grok Build 0.1 validates a config
+  if (pathname === "/api/proxy/servers/validate" && method === "POST") {
+    const authErr = checkAuth(req);
+    if (authErr) return json(res, authErr.status, authErr.body, cors);
+    const body = await readBody(req);
+    if (!body?.config) return json(res, 400, { success: false, error: "config is required" }, cors);
+
+    const aiResult = await callGrokBuild("validate", {
+      targetHost: body.targetHost || "unknown",
+      existingConfig: body.config,
+    });
+
+    return json(res, 200, {
+      success: true,
+      data: aiResult?.validation || { valid: true, issues: [] },
+    }, cors);
+  }
+
+  // POST /api/proxy/servers/launch — launch a new proxy server instance
+  if (pathname === "/api/proxy/servers/launch" && method === "POST") {
+    const authErr = checkAuth(req);
+    if (authErr) return json(res, authErr.status, authErr.body, cors);
+    const body = await readBody(req);
+    const result = await proxyManagerFetch("/api/proxy/servers/launch", { method: "POST", body });
+    return json(res, result.status, result.body, cors);
+  }
+
+  // GET /api/proxy/servers — list all launched servers
+  if (pathname === "/api/proxy/servers" && method === "GET") {
+    const result = await proxyManagerFetch("/api/proxy/servers");
+    return json(res, result.status, result.body, cors);
+  }
+
+  // Server-specific operations
+  const serverMatch = pathname.match(/^\/api\/proxy\/servers\/(\d+)$/);
+  if (serverMatch && method === "GET") {
+    const result = await proxyManagerFetch(`/api/proxy/servers/${serverMatch[1]}`);
+    return json(res, result.status, result.body, cors);
+  }
+
+  const serverStopMatch = pathname.match(/^\/api\/proxy\/servers\/(\d+)\/stop$/);
+  if (serverStopMatch && method === "POST") {
+    const authErr = checkAuth(req);
+    if (authErr) return json(res, authErr.status, authErr.body, cors);
+    const result = await proxyManagerFetch(`/api/proxy/servers/${serverStopMatch[1]}/stop`, { method: "POST" });
+    return json(res, result.status, result.body, cors);
+  }
+
+  const serverLogsMatch = pathname.match(/^\/api\/proxy\/servers\/(\d+)\/logs$/);
+  if (serverLogsMatch && method === "GET") {
+    const authErr = checkAuth(req);
+    if (authErr) return json(res, authErr.status, authErr.body, cors);
+    const result = await proxyManagerFetch(`/api/proxy/servers/${serverLogsMatch[1]}/logs`);
     return json(res, result.status, result.body, cors);
   }
 

@@ -226,6 +226,221 @@ function getTunnelStats(tunnel) {
   };
 }
 
+// ── Proxy server instance management (launch/stop/list child processes) ──────
+
+const proxyServers = new Map(); // id → { id, name, config, port, pid, status, startedAt, health, logs }
+let nextServerId = 1;
+
+/**
+ * Launch a new proxy tunnel server instance as a child process.
+ * Spawns `node proxy-manager.js` with a custom config TOML on a dedicated port.
+ */
+function launchProxyServer(def) {
+  const id = nextServerId++;
+  const port = def.port || (12000 + id);
+  const name = def.name || `proxy-server-${id}`;
+
+  // Write a temporary config file for this instance
+  const configPath = `/tmp/proxy-server-${id}.toml`;
+  const configContent = def.config || generateServerConfig(name, port, def.tunnels || []);
+
+  try {
+    fs.writeFileSync(configPath, configContent, "utf-8");
+  } catch (err) {
+    return { ok: false, error: `Failed to write config: ${err.message}` };
+  }
+
+  const logPath = `/tmp/proxy-server-${id}.log`;
+  const logStream = fs.openSync(logPath, "w");
+
+  let child;
+  try {
+    // Spawn a dedicated proxy-manager process with the instance config
+    child = require("node:child_process").spawn(
+      process.execPath,
+      ["-e", `
+        process.env.CONFIG_PATH = "${configPath}";
+        process.env.PROXY_PORT = "${port}";
+        process.env.PROXY_API_PORT = "${port + 1}";
+        require("./proxy-manager.js");
+      `],
+      {
+        cwd: process.cwd(),
+        stdio: ["ignore", logStream, logStream],
+        detached: false,
+        env: { ...process.env, CONFIG_PATH: configPath, PROXY_PORT: String(port), PROXY_API_PORT: String(port + 1) },
+      },
+    );
+  } catch (err) {
+    fs.closeSync(logStream);
+    return { ok: false, error: `Failed to spawn process: ${err.message}` };
+  }
+
+  const instance = {
+    id,
+    name,
+    port,
+    apiPort: port + 1,
+    pid: child.pid,
+    status: "launching",
+    startedAt: Date.now(),
+    configPath,
+    logPath,
+    child,
+    logStream,
+    health: null,
+    tunnelCount: def.tunnels?.length || 0,
+  };
+
+  child.on("exit", (code) => {
+    instance.status = code === 0 ? "stopped" : "crashed";
+    instance.health = null;
+    console.log(`[proxy-manager] server "${name}" (pid ${instance.pid}) exited with code ${code}`);
+    events.emit("server:stopped", instance);
+  });
+
+  child.on("error", (err) => {
+    instance.status = "crashed";
+    instance.health = null;
+    console.error(`[proxy-manager] server "${name}" error: ${err.message}`);
+  });
+
+  // Mark as running after a short startup window
+  setTimeout(() => {
+    if (instance.status === "launching") {
+      instance.status = "running";
+      // Quick health probe
+      checkServerHealth(instance);
+      events.emit("server:started", instance);
+    }
+  }, 2000);
+
+  proxyServers.set(id, instance);
+
+  // Periodic health checks
+  const healthInterval = setInterval(() => checkServerHealth(instance), 15000);
+  instance._healthInterval = healthInterval;
+
+  return { ok: true, data: getServerStats(instance) };
+}
+
+function checkServerHealth(instance) {
+  if (instance.status !== "running") return;
+  const url = `http://127.0.0.1:${instance.apiPort}/health`;
+  const req = http.get(url, { timeout: 3000 }, (res) => {
+    let data = "";
+    res.on("data", (chunk) => (data += chunk));
+    res.on("end", () => {
+      try {
+        instance.health = JSON.parse(data);
+        instance.status = "running";
+      } catch {
+        instance.health = { status: "degraded", raw: data.slice(0, 200) };
+      }
+    });
+  });
+  req.on("error", () => {
+    if (instance.status === "running") {
+      instance.status = "degraded";
+      instance.health = null;
+    }
+  });
+  req.on("timeout", () => {
+    req.destroy();
+    instance.status = "degraded";
+  });
+}
+
+function stopProxyServer(id) {
+  const instance = proxyServers.get(id);
+  if (!instance) return { ok: false, error: "server not found" };
+  if (instance.status === "stopped") return { ok: false, error: "already stopped" };
+
+  // Clear health check interval
+  if (instance._healthInterval) {
+    clearInterval(instance._healthInterval);
+  }
+
+  // Kill the child process
+  try {
+    if (instance.child && !instance.child.killed) {
+      instance.child.kill("SIGTERM");
+      // Force kill after 5s if still alive
+      setTimeout(() => {
+        try { if (instance.child && !instance.child.killed) instance.child.kill("SIGKILL"); } catch { /* already dead */ }
+      }, 5000);
+    }
+  } catch (err) {
+    // Process may already be dead
+  }
+
+  instance.status = "stopped";
+  instance.health = null;
+
+  // Close log stream
+  try { if (instance.logStream) fs.closeSync(instance.logStream); } catch { /* already closed */ }
+
+  // Clean up temp config
+  try { fs.unlinkSync(instance.configPath); } catch { /* already deleted */ }
+
+  events.emit("server:stopped", instance);
+  return { ok: true };
+}
+
+function getServerStats(instance) {
+  return {
+    id: instance.id,
+    name: instance.name,
+    port: instance.port,
+    apiPort: instance.apiPort,
+    pid: instance.pid,
+    status: instance.status,
+    uptime: instance.startedAt ? Math.round((Date.now() - instance.startedAt) / 1000) : 0,
+    health: instance.health,
+    tunnelCount: instance.tunnelCount,
+    startedAt: instance.startedAt,
+  };
+}
+
+function generateServerConfig(name, port, tunnels) {
+  const lines = [
+    "# Auto-generated by proxy-manager (Grok Build 0.1)",
+    `# Server: ${name}`,
+    "",
+    "[server]",
+    `bindAddr = "0.0.0.0"`,
+    `bindPort = ${port}`,
+    "",
+    "[health]",
+    `path = "/health"`,
+    `intervalSeconds = 30`,
+    `timeoutSeconds = 5`,
+    "",
+    "[gateway]",
+    `apiPort = ${port + 1}`,
+    `healthPath = "/health"`,
+    `corsOrigins = ["*"]`,
+    "",
+    "[auth]",
+    `apiKey = "${process.env.API_KEY || ""}"`,
+    `token = "${process.env.PROXY_TOKEN || ""}"`,
+    "",
+  ];
+
+  for (const t of tunnels) {
+    lines.push("[[proxies]]");
+    lines.push(`name = "${t.name || `tunnel-${Math.random().toString(36).slice(2, 8)}`}"`);
+    lines.push(`type = "${t.type || "tcp"}"`);
+    lines.push(`localIP = "${t.localIP || "127.0.0.1"}"`);
+    lines.push(`localPort = ${t.localPort || 3000}`);
+    lines.push(`remotePort = ${t.remotePort || (port + 100 + tunnels.indexOf(t))}`);
+    lines.push(`autoStart = ${t.autoStart !== false ? "true" : "false"}`);
+    lines.push("");
+  }
+
+  return lines.join("\n");
+}
+
 // ── Proxy API server (internal, for gateway queries) ─────────────────────────
 
 function json(res, status, body) {
@@ -331,9 +546,65 @@ const apiServer = http.createServer(async (req, res) => {
     });
   }
 
+  // ── Proxy Server Instance Management (launch/stop/list child processes) ──
+
+  // GET /api/proxy/servers — list all launched proxy server instances
+  if (url.pathname === "/api/proxy/servers" && method === "GET") {
+    const list = [];
+    for (const s of proxyServers.values()) list.push(getServerStats(s));
+    return json(res, 200, { success: true, data: list, count: list.length });
+  }
+
+  // POST /api/proxy/servers/launch — launch a new proxy server instance
+  if (url.pathname === "/api/proxy/servers/launch" && method === "POST") {
+    const body = await readBody(req);
+    if (!body?.port) return json(res, 400, { success: false, error: "port is required" });
+    const result = launchProxyServer(body);
+    if (!result.ok) return json(res, 500, { success: false, error: result.error });
+    return json(res, 201, { success: true, data: result.data });
+  }
+
+  // GET /api/proxy/servers/:id — single server instance
+  const serverIdMatch = url.pathname.match(/^\/api\/proxy\/servers\/(\d+)$/);
+  if (serverIdMatch && method === "GET") {
+    const id = parseInt(serverIdMatch[1], 10);
+    const instance = proxyServers.get(id);
+    if (!instance) return json(res, 404, { success: false, error: "server not found" });
+    return json(res, 200, { success: true, data: getServerStats(instance) });
+  }
+
+  // POST /api/proxy/servers/:id/stop — stop a server instance
+  const serverStopMatch = url.pathname.match(/^\/api\/proxy\/servers\/(\d+)\/stop$/);
+  if (serverStopMatch && method === "POST") {
+    const id = parseInt(serverStopMatch[1], 10);
+    const result = stopProxyServer(id);
+    return json(res, result.ok ? 200 : 400, result);
+  }
+
+  // GET /api/proxy/servers/:id/logs — tail recent logs from a server instance
+  const serverLogsMatch = url.pathname.match(/^\/api\/proxy\/servers\/(\d+)\/logs$/);
+  if (serverLogsMatch && method === "GET") {
+    const id = parseInt(serverLogsMatch[1], 10);
+    const instance = proxyServers.get(id);
+    if (!instance) return json(res, 404, { success: false, error: "server not found" });
+    let logs = "";
+    try {
+      logs = fs.readFileSync(instance.logPath, "utf-8").slice(-10000); // last 10KB
+    } catch {
+      logs = "(no logs yet)";
+    }
+    return json(res, 200, { success: true, data: { logs } });
+  }
+
   // GET /health — health check
   if ((url.pathname === "/health" || url.pathname === "/") && method === "GET") {
-    return json(res, 200, { status: "ok", uptime: Math.round((Date.now() - startedAt) / 1000) });
+    const runningServers = [...proxyServers.values()].filter((s) => s.status === "running").length;
+    return json(res, 200, {
+      status: "ok",
+      uptime: Math.round((Date.now() - startedAt) / 1000),
+      childServers: runningServers,
+      totalServers: proxyServers.size,
+    });
   }
 
   json(res, 404, { success: false, error: "not found" });

@@ -205,3 +205,48 @@ export type IterateResult = {
   improvements: string[];
   score: number;
 };
+
+// ── Proxy Server Instance (launched via Grok Build 0.1) ──
+
+export type ProxyServerInstance = {
+  id: number;
+  name: string;
+  port: number;
+  apiPort: number;
+  pid: number;
+  status: "launching" | "running" | "degraded" | "stopped" | "crashed";
+  uptime: number;
+  health: { status: string; uptime?: number } | null;
+  tunnelCount: number;
+  startedAt: number;
+};
+
+export type ServerListResult = {
+  data: ProxyServerInstance[];
+  count: number;
+};
+
+export type ServerLaunchInput = {
+  name: string;
+  port: number;
+  config?: string;
+  tunnels?: {
+    name: string;
+    type?: "tcp" | "http";
+    localIP?: string;
+    localPort: number;
+    remotePort?: number;
+    autoStart?: boolean;
+  }[];
+};
+
+export type ServerConfigResult = {
+  config: string;
+  model?: string;
+  generated: boolean;
+};
+
+export type ServerValidateResult = {
+  valid: boolean;
+  issues: { severity: "critical" | "warning" | "info"; line?: string; message: string; fix?: string }[];
+};

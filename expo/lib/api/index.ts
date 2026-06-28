@@ -44,6 +44,13 @@ export {
   iteratePhishlet,
   fetchHarExport,
   replayHar,
+  fetchServers,
+  launchServer,
+  fetchServer,
+  stopServer,
+  fetchServerLogs,
+  configureServer,
+  validateServerConfig,
 } from "./endpoints";
 
 export type {
@@ -68,4 +75,9 @@ export type {
   ReplayReport,
   CritiqueEntry,
   IterateResult,
+  ProxyServerInstance,
+  ServerListResult,
+  ServerLaunchInput,
+  ServerConfigResult,
+  ServerValidateResult,
 } from "./types";

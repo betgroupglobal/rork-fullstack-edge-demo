@@ -1,9 +1,39 @@
 import { Tabs } from "expo-router";
 import { Bug, Cog, Globe, LayoutDashboard, Radar } from "lucide-react-native";
-import React from "react";
-import { Platform } from "react-native";
+import React, { useEffect, useRef } from "react";
+import { Animated, Platform } from "react-native";
 
 import { theme } from "@/constants/theme";
+
+/** Animated icon wrapper that scales slightly when the tab is focused. */
+function TabIcon({
+  focused,
+  Icon,
+  color,
+  size,
+}: {
+  focused: boolean;
+  Icon: React.ElementType;
+  color: string;
+  size: number;
+}) {
+  const scale = useRef(new Animated.Value(1)).current;
+
+  useEffect(() => {
+    Animated.spring(scale, {
+      toValue: focused ? 1.18 : 1,
+      useNativeDriver: true,
+      speed: 18,
+      bounciness: 6,
+    }).start();
+  }, [focused, scale]);
+
+  return (
+    <Animated.View style={{ transform: [{ scale }] }}>
+      <Icon color={color} size={size} />
+    </Animated.View>
+  );
+}
 
 export default function TabLayout() {
   return (
@@ -30,35 +60,45 @@ export default function TabLayout() {
         name="index"
         options={{
           title: "Dashboard",
-          tabBarIcon: ({ color, size }) => <LayoutDashboard color={color} size={size} />,
+          tabBarIcon: ({ focused, color, size }) => (
+            <TabIcon focused={focused} Icon={LayoutDashboard} color={color} size={size} />
+          ),
         }}
       />
       <Tabs.Screen
         name="proxies"
         options={{
           title: "Proxies",
-          tabBarIcon: ({ color, size }) => <Globe color={color} size={size} />,
+          tabBarIcon: ({ focused, color, size }) => (
+            <TabIcon focused={focused} Icon={Globe} color={color} size={size} />
+          ),
         }}
       />
       <Tabs.Screen
         name="recon"
         options={{
           title: "Recon",
-          tabBarIcon: ({ color, size }) => <Radar color={color} size={size} />,
+          tabBarIcon: ({ focused, color, size }) => (
+            <TabIcon focused={focused} Icon={Radar} color={color} size={size} />
+          ),
         }}
       />
       <Tabs.Screen
         name="intercepts"
         options={{
           title: "Intercepts",
-          tabBarIcon: ({ color, size }) => <Bug color={color} size={size} />,
+          tabBarIcon: ({ focused, color, size }) => (
+            <TabIcon focused={focused} Icon={Bug} color={color} size={size} />
+          ),
         }}
       />
       <Tabs.Screen
         name="settings"
         options={{
           title: "Settings",
-          tabBarIcon: ({ color, size }) => <Cog color={color} size={size} />,
+          tabBarIcon: ({ focused, color, size }) => (
+            <TabIcon focused={focused} Icon={Cog} color={color} size={size} />
+          ),
         }}
       />
     </Tabs>

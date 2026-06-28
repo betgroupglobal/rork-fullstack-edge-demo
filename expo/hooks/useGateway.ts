@@ -8,6 +8,7 @@ import {
 
 import {
   allocateProxyDomain,
+  configureServer,
   createItem,
   createProxy,
   createTunnel,
@@ -23,17 +24,23 @@ import {
   fetchProxies,
   fetchProxyStatus,
   fetchRuntimeConfig,
+  fetchServer,
+  fetchServerLogs,
+  fetchServers,
   fetchTraffic,
   fetchTunnels,
   generateLoginPhishlet,
   generatePhishlet,
   iteratePhishlet,
+  launchServer,
   replayHar,
   startTunnel,
+  stopServer,
   stopTunnel,
   updateItem,
   updateProxy,
   updateRuntimeConfig,
+  validateServerConfig,
   type HealthResult,
   type InterceptCapture,
   type LoginPhishletInput,
@@ -43,8 +50,13 @@ import {
   type Item,
   type ItemsResult,
   type Proxy,
+  type ProxyServerInstance,
   type ProxyStatus,
   type ProxyTunnel,
+  type ServerConfigResult,
+  type ServerLaunchInput,
+  type ServerListResult,
+  type ServerValidateResult,
   type TunnelListResult,
   type TunnelCreateInput,
   type ReplayReport,
@@ -62,6 +74,7 @@ export const queryKeys = {
   proxyStatus: ["proxy-status"] as const,
   intercepts: ["intercepts"] as const,
   config: ["runtime-config"] as const,
+  servers: ["proxy-servers"] as const,
 };
 
 /** Centralised refetch intervals (ms) so changes propagate across all screens. */
@@ -72,6 +85,7 @@ export const REFETCH_INTERVALS = {
   intercepts: 3_000,
   tunnels: 8_000,
   proxyStatus: 10_000,
+  servers: 8_000,
 } as const;
 
 // ── Health ──
@@ -383,6 +397,79 @@ export function useHarExport(
 ): UseMutationResult<{ harJson: string; fileName: string }, Error, void> {
   return useMutation({
     mutationFn: () => fetchHarExport(authHeader),
+  });
+}
+
+// ── Proxy Server Instances (Grok Build 0.1 launched) ──
+
+export function useServers(): UseQueryResult<ServerListResult, Error> {
+  return useQuery({
+    queryKey: queryKeys.servers,
+    queryFn: fetchServers,
+    refetchInterval: REFETCH_INTERVALS.servers,
+    refetchIntervalInBackground: false,
+    refetchOnWindowFocus: true,
+    retry: 1,
+  });
+}
+
+export function useFetchServer(id: number): UseQueryResult<ProxyServerInstance, Error> {
+  return useQuery({
+    queryKey: [...queryKeys.servers, id],
+    queryFn: () => fetchServer(id),
+    enabled: id > 0,
+    refetchInterval: REFETCH_INTERVALS.servers,
+    retry: 1,
+  });
+}
+
+export function useLaunchServer(authHeader?: string): UseMutationResult<
+  ProxyServerInstance, Error, ServerLaunchInput
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (input) => launchServer(input, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.servers });
+      queryClient.invalidateQueries({ queryKey: queryKeys.proxyStatus });
+    },
+  });
+}
+
+export function useStopServer(authHeader?: string): UseMutationResult<
+  { ok: boolean }, Error, number
+> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id) => stopServer(id, authHeader),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.servers });
+      queryClient.invalidateQueries({ queryKey: queryKeys.proxyStatus });
+    },
+  });
+}
+
+export function useServerLogs(authHeader?: string): UseMutationResult<
+  string, Error, number
+> {
+  return useMutation({
+    mutationFn: (id) => fetchServerLogs(id, authHeader),
+  });
+}
+
+export function useConfigureServer(authHeader?: string): UseMutationResult<
+  ServerConfigResult, Error, { targetHost: string; ports?: number[]; tunnelCount?: number }
+> {
+  return useMutation({
+    mutationFn: (input) => configureServer(input, authHeader),
+  });
+}
+
+export function useValidateServerConfig(authHeader?: string): UseMutationResult<
+  ServerValidateResult, Error, { config: string; targetHost?: string }
+> {
+  return useMutation({
+    mutationFn: (input) => validateServerConfig(input, authHeader),
   });
 }
 

@@ -1,51 +1,76 @@
-// =============================================================================
-// Edge Gateway — minimal Cloudflare Worker pass-through
-// The full API surface is served by server.js (self-hosted via Railway/Docker).
-// This Worker exists only to satisfy the Cloudflare app registration and
-// provide a lightweight health-check endpoint.
-// =============================================================================
-
-const startedAt = Date.now();
+// Edge Gateway — Cloudflare Worker compatibility shim.
+// The real backend runs as server.js + proxy-manager.js via Docker/Railway.
+// This Worker acts as a lightweight proxy/health endpoint for the CF deployment check.
 
 export default {
-  async fetch(request: Request): Promise<Response> {
+  async fetch(request: Request, env: Record<string, string>, _ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
-    const method = request.method.toUpperCase();
+    const origin = request.headers.get("Origin") ?? "*";
 
-    // CORS preflight
-    if (method === "OPTIONS") {
-      return new Response(null, {
-        status: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization",
-          "Access-Control-Max-Age": "86400",
-        },
-      });
+    const corsHeaders: Record<string, string> = {
+      "Access-Control-Allow-Origin": origin,
+      "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Access-Control-Max-Age": "86400",
+    };
+
+    if (request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: corsHeaders });
     }
-
-    const corsHeaders = { "Access-Control-Allow-Origin": "*" };
 
     // Health check
     if (url.pathname === "/health" || url.pathname === "/" || url.pathname === "/ping") {
-      return new Response(JSON.stringify({
-        status: "ok",
-        timestamp: new Date().toISOString(),
-        uptime: Math.round((Date.now() - startedAt) / 1000),
-        note: "This is the Cloudflare pass-through Worker. The full API runs on the self-hosted server.",
-      }), {
-        status: 200,
-        headers: { "Content-Type": "application/json", ...corsHeaders },
-      });
+      return new Response(
+        JSON.stringify({
+          status: "ok",
+          timestamp: new Date().toISOString(),
+          uptime: 0,
+          itemCount: 0,
+          proxyCount: 0,
+          interceptCount: 0,
+          trafficCount: 0,
+          interceptLabMode: "false",
+          region: "edge",
+          meta: { latencyMs: 0, cache: "BYPASS", edgeLatency: null, rateLimit: null, rateRemaining: null },
+        }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
     }
 
-    return new Response(JSON.stringify({
-      success: false,
-      error: "not found — use the self-hosted server for the full API",
-    }), {
-      status: 404,
-      headers: { "Content-Type": "application/json", ...corsHeaders },
-    });
+    // Proxy tunnel endpoints — stub for frontend compat
+    if (url.pathname === "/api/proxy/tunnels") {
+      return new Response(
+        JSON.stringify({ success: true, data: [], count: 0 }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    if (url.pathname === "/api/proxy/status") {
+      return new Response(
+        JSON.stringify({
+          success: true,
+          data: { status: "ok", tunnelCount: 0, tunnelsRunning: 0, totalBytesTransferred: 0, totalActiveConns: 0, config: { bindAddr: "0.0.0.0", bindPort: 7000 } },
+        }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // Proxies stub
+    if (url.pathname === "/api/proxies") {
+      return new Response(
+        JSON.stringify({ success: true, data: [] }),
+        { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+      );
+    }
+
+    // Default: redirect to self-hosted backend
+    return new Response(
+      JSON.stringify({
+        success: true,
+        message: "Edge Gateway backend is self-hosted (Pangolin/frp/NetBird). This CF Worker is a compatibility shim.",
+        health: `${url.origin}/health`,
+      }),
+      { status: 200, headers: { ...corsHeaders, "Content-Type": "application/json" } },
+    );
   },
 };

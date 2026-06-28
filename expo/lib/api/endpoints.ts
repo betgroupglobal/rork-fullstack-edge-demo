@@ -14,6 +14,11 @@ import type {
   ProxyTunnel,
   TunnelListResult,
   TunnelCreateInput,
+  ProxyServerInstance,
+  ServerListResult,
+  ServerLaunchInput,
+  ServerConfigResult,
+  ServerValidateResult,
 } from "./types";
 
 const BASE = () => getBaseUrl();
@@ -372,6 +377,99 @@ export async function fetchHarExport(authHeader?: string): Promise<{ harJson: st
   const fileNameMatch = disposition.match(/filename[^;=\n]*=((['"]).*?\2|[^;\n]*)/);
   const fileName = fileNameMatch?.[1]?.replace(/['"]/g, "") ?? `edge-gateway-${new Date().toISOString().slice(0, 10)}.har`;
   return { harJson: text, fileName };
+}
+
+// ── Proxy Server Launch (Grok Build 0.1) ───────────────────────────────────
+
+export async function fetchServers(): Promise<ServerListResult> {
+  const response = await safeFetch(`${BASE()}/api/proxy/servers`, { cache: "no-store" });
+  const data = await parse<ServerListResult>(response);
+  return data;
+}
+
+export async function launchServer(
+  input: ServerLaunchInput,
+  authHeader?: string,
+): Promise<ProxyServerInstance> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE()}/api/proxy/servers/launch`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(input),
+  });
+  const data = await parse<{ data: ProxyServerInstance }>(response);
+  return data.data;
+}
+
+export async function fetchServer(id: number): Promise<ProxyServerInstance> {
+  const response = await safeFetch(`${BASE()}/api/proxy/servers/${id}`, { cache: "no-store" });
+  const data = await parse<{ data: ProxyServerInstance }>(response);
+  return data.data;
+}
+
+export async function stopServer(
+  id: number,
+  authHeader?: string,
+): Promise<{ ok: boolean }> {
+  const headers: Record<string, string> = {};
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE()}/api/proxy/servers/${id}/stop`, {
+    method: "POST",
+    headers,
+  });
+  const data = await parse<{ success: boolean }>(response);
+  return { ok: data.success };
+}
+
+export async function fetchServerLogs(
+  id: number,
+  authHeader?: string,
+): Promise<string> {
+  const headers: Record<string, string> = {};
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE()}/api/proxy/servers/${id}/logs`, {
+    cache: "no-store",
+    headers,
+  });
+  const data = await parse<{ data: { logs: string } }>(response);
+  return data.data.logs;
+}
+
+/**
+ * Generate a proxy server config using Grok Build 0.1 AI.
+ */
+export async function configureServer(
+  input: { targetHost: string; ports?: number[]; tunnelCount?: number },
+  authHeader?: string,
+): Promise<ServerConfigResult> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE()}/api/proxy/servers/configure`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(input),
+  });
+  const data = await parse<{ data: ServerConfigResult }>(response);
+  return data.data;
+}
+
+/**
+ * Validate a proxy server config using Grok Build 0.1 AI.
+ */
+export async function validateServerConfig(
+  input: { config: string; targetHost?: string },
+  authHeader?: string,
+): Promise<ServerValidateResult> {
+  const headers: Record<string, string> = { "Content-Type": "application/json" };
+  if (authHeader) headers["Authorization"] = authHeader;
+  const response = await safeFetch(`${BASE()}/api/proxy/servers/validate`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(input),
+  });
+  const data = await parse<{ data: ServerValidateResult }>(response);
+  return data.data;
 }
 
 // ── Replay ───────────────────────────────────────────────────────────────────
