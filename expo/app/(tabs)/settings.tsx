@@ -2,6 +2,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import { LinearGradient } from "expo-linear-gradient";
 import {
   ArrowRight,
+  CheckCircle2,
   Cpu,
   Eye,
   EyeOff,
@@ -16,6 +17,8 @@ import {
   Sliders,
   Trash2,
   Wrench,
+  XCircle,
+  Zap,
 } from "lucide-react-native";
 import React, { useCallback, useEffect, useState } from "react";
 import {
@@ -44,6 +47,7 @@ import {
   useDeleteRuntimeConfig,
   useProxyStatus,
   useRuntimeConfig,
+  useTestHealth,
   useTunnels,
   useUpdateRuntimeConfig,
 } from "@/hooks/useGateway";
@@ -143,6 +147,7 @@ export default function SettingsScreen() {
   const config = useRuntimeConfig(ah);
   const updateConfig = useUpdateRuntimeConfig(ah);
   const clearConfig = useDeleteRuntimeConfig(ah);
+  const testHealth = useTestHealth();
   const [edit, setEdit] = useState<Record<string, string>>({ ...FIELD_DEFAULT });
   const [editDirty, setEditDirty] = useState(false);
 
@@ -259,6 +264,44 @@ export default function SettingsScreen() {
                   <Text style={form.submitText}>{updateConfig.isPending ? "Saving..." : "Save runtime config"}</Text>
                 </PressableScale>
               )}
+
+              {/* Test Connection */}
+              <View style={styles.testSection}>
+                <PressableScale
+                  onPress={() => testHealth.mutate()}
+                  disabled={testHealth.isPending}
+                  haptic="light"
+                  style={[form.submitBtn, { backgroundColor: theme.colors.surface, borderWidth: 1, borderColor: theme.colors.border }]}
+                >
+                  {testHealth.isPending ? (
+                    <ActivityIndicator size="small" color={theme.colors.accent} />
+                  ) : (
+                    <Zap size={15} color={theme.colors.accent} />
+                  )}
+                  <Text style={[form.submitText, { color: theme.colors.accent }]}>
+                    {testHealth.isPending ? "Testing..." : "Test Connection"}
+                  </Text>
+                </PressableScale>
+
+                {testHealth.isSuccess && testHealth.data && (
+                  <View style={styles.testResult}>
+                    <CheckCircle2 size={14} color={theme.colors.ok} />
+                    <Text style={styles.testOkText}>
+                      Gateway healthy — {testHealth.data.meta.latencyMs ?? "?"}ms latency
+                      {testHealth.data.uptime ? `, uptime ${Math.floor(testHealth.data.uptime / 60)}m` : ""}
+                    </Text>
+                  </View>
+                )}
+
+                {testHealth.isError && (
+                  <View style={[styles.testResult, styles.testResultErr]}>
+                    <XCircle size={14} color={theme.colors.danger} />
+                    <Text style={styles.testErrText} numberOfLines={3}>
+                      {testHealth.error?.message ?? "Connection failed"}
+                    </Text>
+                  </View>
+                )}
+              </View>
             </>
           )}
         </View>
@@ -411,4 +454,9 @@ const styles = StyleSheet.create({
   capTitle: { color: theme.colors.text, fontSize: 13, fontWeight: "700" },
   capText: { color: theme.colors.textDim, fontSize: 11, lineHeight: 16 },
   footer: { color: theme.colors.textFaint, fontSize: 11, textAlign: "center", marginTop: theme.spacing(4), fontFamily: theme.font.mono },
+  testSection: { gap: theme.spacing(1.5), marginTop: theme.spacing(1.5) },
+  testResult: { flexDirection: "row", alignItems: "center", gap: theme.spacing(2), padding: theme.spacing(2.5), backgroundColor: "rgba(60,224,138,0.08)", borderRadius: theme.radius.sm, borderWidth: 1, borderColor: "rgba(60,224,138,0.25)" },
+  testOkText: { color: theme.colors.ok, fontSize: 12, fontWeight: "600", flexShrink: 1 },
+  testResultErr: { backgroundColor: "rgba(255,92,114,0.08)", borderColor: "rgba(255,92,114,0.25)" },
+  testErrText: { color: theme.colors.danger, fontSize: 12, fontWeight: "600", flexShrink: 1 },
 });

@@ -44,8 +44,7 @@ export default function RootLayout() {
       <WebSocketBridge />
       <SafeAreaProvider>
         <GestureHandlerRootView style={{ flex: 1, backgroundColor: theme.colors.bg }}>
-          <StatusBar style="light" />
-          <RootLayoutNav />
+          <StatusBar style="light" /><RootLayoutNav />
         </GestureHandlerRootView>
       </SafeAreaProvider>
     </QueryClientProvider>

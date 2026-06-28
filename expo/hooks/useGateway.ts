@@ -88,6 +88,13 @@ export function useHealth(): UseQueryResult<HealthResult, Error> {
   });
 }
 
+/** One-shot test: calls the health endpoint and returns the result. Used by the settings "Test Connection" button. */
+export function useTestHealth(): UseMutationResult<HealthResult, Error, void> {
+  return useMutation({
+    mutationFn: fetchHealth,
+  });
+}
+
 // ── Items ──
 
 export function useItems(): UseQueryResult<ItemsResult, Error> {
