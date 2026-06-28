@@ -62,10 +62,12 @@ start_service gateway node /app/server.js &
 # --- Health gate: wait for gateway to be ready --------------------------------
 echo "[start] waiting for gateway health on http://127.0.0.1:${HEALTH_PORT}/health"
 for i in $(seq 1 60); do
-  if curl -sf "http://127.0.0.1:${HEALTH_PORT}/health" > /dev/null 2>&1; then
+  OUTPUT=$(curl -sv "http://127.0.0.1:${HEALTH_PORT}/health" 2>&1)
+  if echo "$OUTPUT" | grep -qE "HTTP/[0-9.]+ 200|< HTTP/[0-9]+ 200"; then
     echo "[start] gateway is healthy"
     break
   fi
+  echo "[start] health check failed: $OUTPUT"
   if [ "$i" -eq 60 ]; then
     echo "[start] gateway failed to become healthy after 60s; aborting"
     exit 1
