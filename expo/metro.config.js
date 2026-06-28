@@ -3,13 +3,9 @@ const { withRorkMetro } = require("@rork-ai/toolkit-sdk/metro");
 
 const config = getDefaultConfig(__dirname);
 
-// Wrap the withRorkMetro result to add resolver aliases for the old
-// react-native/src/private/inspector paths (used by SDK 53 inspector)
-// that were moved in React Native 0.81.5 to devsupport/devmenu/elementinspector
 const rorkConfig = withRorkMetro(config);
 
-const originalResolveRequest = rorkConfig.resolver.resolveRequest;
-
+// Redirect old RN inspector paths (sdk53) to their new location in RN 0.81+
 const inspectorAliases = {
   "react-native/src/private/inspector/getInspectorDataForViewAtPoint":
     "react-native/src/private/devsupport/devmenu/elementinspector/getInspectorDataForViewAtPoint",
@@ -19,11 +15,29 @@ const inspectorAliases = {
     "react-native/src/private/devsupport/devmenu/elementinspector/InspectorPanel",
 };
 
-rorkConfig.resolver.resolveRequest = (context, moduleName, platform) => {
-  if (inspectorAliases[moduleName]) {
-    return originalResolveRequest(context, inspectorAliases[moduleName], platform);
-  }
-  return originalResolveRequest(context, moduleName, platform);
+const upstreamResolve = rorkConfig.server?.enhanceMiddleware
+  ? undefined
+  : rorkConfig.resolver?.resolveRequest;
+
+rorkConfig.resolver = {
+  ...rorkConfig.resolver,
+  resolveRequest: (context, moduleName, platform) => {
+    if (inspectorAliases[moduleName]) {
+      return { filePath: inspectorAliases[moduleName], type: "sourceFile" };
+    }
+    if (upstreamResolve) {
+      return upstreamResolve(context, moduleName, platform);
+    }
+    return context.resolveRequest(context, moduleName, platform);
+  },
 };
+
+// If withRorkMetro uses enhanceMiddleware instead of resolveRequest, wrap that
+if (rorkConfig.server?.enhanceMiddleware) {
+  const origEnhance = rorkConfig.server.enhanceMiddleware;
+  rorkConfig.server.enhanceMiddleware = (middleware, server) => {
+    return origEnhance(middleware, server);
+  };
+}
 
 module.exports = rorkConfig;
